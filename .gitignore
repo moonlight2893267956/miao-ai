@@ -1,0 +1,36 @@
+# Miao AI 全局 .env 模板
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+.next/
+out/
+build/
+dist/
+.turbo/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 测试/日志
+*.log
+coverage/
+.nyc_output/
+
+# Agent 运行产生的临时文件
+agents-runtime/
+*.pid

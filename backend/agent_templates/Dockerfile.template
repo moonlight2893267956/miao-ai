@@ -1,0 +1,9 @@
+FROM python:3.12-slim
+WORKDIR /app
+COPY miao_runner.py /app/miao_runner.py
+COPY agent.py /app/agent.py
+COPY requirements.txt* /app/
+RUN pip install --no-cache-dir fastapi uvicorn pydantic langfuse
+RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
+EXPOSE 8080
+CMD ["python", "/app/miao_runner.py", "/app", "agent:invoke", "8080"]

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { AlertCircle, ArrowLeft, Play, Upload, KeyRound, Copy, Trash2, RefreshCw, Download, Loader2, CheckCircle2 } from "lucide-react";
+import { AlertCircle, ArrowLeft, Play, Upload, KeyRound, Copy, Trash2, RefreshCw, Download, Loader2, CheckCircle2, Cpu } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,6 +14,7 @@ import {
   type AgentVersion,
   type ApiKey,
   type ApiKeyWithSecret,
+  type LlmModel,
   activateVersion,
   createKey,
   deleteAgent as apiDeleteAgent,
@@ -22,8 +23,10 @@ import {
   invokeAgent,
   invokeAgentStream,
   listKeys,
+  listModels,
   listVersions,
   revokeKey,
+  updateAgentModel,
   uploadVersion,
 } from "@/lib/api";
 
@@ -40,6 +43,7 @@ export default function AgentDetailPage() {
   const [agent, setAgent] = useState<Agent | null>(null);
   const [versions, setVersions] = useState<AgentVersion[]>([]);
   const [keys, setKeys] = useState<ApiKey[]>([]);
+  const [models, setModels] = useState<LlmModel[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -51,15 +55,17 @@ export default function AgentDetailPage() {
     // 保证动画至少展示 400ms，避免快响应时无感知
     const minAnim = new Promise((r) => setTimeout(r, 400));
     try {
-      const [a, v, k] = await Promise.all([
+      const [a, v, k, m] = await Promise.all([
         getAgent(name),
         listVersions(name),
         listKeys(name),
+        listModels(),
         minAnim,
       ]);
       setAgent(a);
       setVersions(v);
       setKeys(k);
+      setModels(m);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -123,6 +129,19 @@ export default function AgentDetailPage() {
       router.push("/agents");
     } catch (e) {
       setActionError((e as Error).message);
+    }
+  }
+
+  async function onModelChange(modelId: string) {
+    setBusy(true);
+    setActionError(null);
+    try {
+      const updated = await updateAgentModel(name, modelId || null);
+      setAgent(updated);
+    } catch (e) {
+      setActionError((e as Error).message);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -261,6 +280,10 @@ export default function AgentDetailPage() {
     { id: "keys", label: "API Keys", count: keys.length },
     { id: "tryrun", label: "Try Run" },
   ];
+  const defaultModel = models.find((model) => model.is_default) ?? null;
+  const systemDefaultLabel = defaultModel
+    ? `系统默认 (${defaultModel.provider_name ?? "Provider"} / ${defaultModel.name})`
+    : "系统默认 (.env DASHSCOPE_*)";
 
   return (
     <div className="page-stack">
@@ -302,7 +325,24 @@ export default function AgentDetailPage() {
               ID: {agent.id}
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex min-w-[260px] items-center gap-2">
+              <Cpu className="h-4 w-4 shrink-0 text-[var(--color-text-tertiary)]" />
+              <select
+                aria-label="Agent model"
+                className="select-control"
+                value={agent.model_id ?? ""}
+                onChange={(e) => onModelChange(e.target.value)}
+                disabled={busy}
+              >
+                <option value="">{systemDefaultLabel}</option>
+                {models.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.provider_name ?? "Provider"} / {model.name}
+                  </option>
+                ))}
+              </select>
+            </div>
             <StatusBadge status={agent.status} />
             <Button
               variant="outline"

@@ -18,6 +18,8 @@ from .api.agents import router as agents_router
 from .api.health import router as health_router
 from .api.invoke import router as invoke_router
 from .api.keys import router as keys_router
+from .api.models import router as models_router
+from .api.providers import router as providers_router
 from .api.versions import router as versions_router
 from .config import settings
 from .db import AsyncSessionLocal, engine
@@ -25,6 +27,7 @@ from .logging import configure_logging, get_logger
 from .models.agent import Agent
 from .models.agent_version import AgentVersion
 from .runtime.manager import ManagedAgent
+from .runtime.llm_env import resolve_llm_env
 from .runtime.registry import AgentRegistry
 from .runtime.storage import download_zip
 from .services.task_worker import TaskWorker
@@ -57,6 +60,7 @@ async def _recover_active_agents() -> None:
         async with AsyncSessionLocal() as session:
             r = await session.execute(select(Agent).where(Agent.id == av.agent_id))
             agent = r.scalar_one_or_none()
+            llm_env = await resolve_llm_env(agent.id, session) if agent else {}
         if not agent:
             log.warning("miao.recovery.agent_not_found version_id=%s", av.id)
             continue
@@ -111,6 +115,7 @@ async def _recover_active_agents() -> None:
             runtime_mode=settings.agent_runtime_mode,
             max_restarts=settings.agent_max_restarts,
             restart_base_delay=settings.agent_restart_base_delay,
+            llm_env=llm_env,
         )
         ok = await asyncio.to_thread(managed.build_and_start)
         if ok:
@@ -220,6 +225,8 @@ app.include_router(health_router, prefix="/api/v1")
 app.include_router(agents_router, prefix="/api/v1")
 app.include_router(versions_router, prefix="/api/v1")
 app.include_router(keys_router, prefix="/api/v1")
+app.include_router(providers_router, prefix="/api/v1")
+app.include_router(models_router, prefix="/api/v1")
 app.include_router(invoke_router, prefix="/api/v1")
 
 

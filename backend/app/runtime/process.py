@@ -29,9 +29,13 @@ def spawn_agent_process(
     entrypoint: str,
     port: int,
     log_path: Path,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.Popen:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = open(log_path, "ab")
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
     return subprocess.Popen(
         [
             venv_python,
@@ -42,6 +46,7 @@ def spawn_agent_process(
         ],
         stdout=log_file,
         stderr=subprocess.STDOUT,
+        env=env,
         start_new_session=True,  # 自己的进程组，方便 kill
     )
 

@@ -897,6 +897,35 @@
     font-size: var(--text-xs);
   }
 
+  .select-control {
+    display: flex;
+    height: 36px;
+    width: 100%;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border-default);
+    background: var(--color-surface-primary);
+    padding: 0 34px 0 13px;
+    color: var(--color-text-primary);
+    font-size: var(--text-sm);
+    box-shadow: var(--shadow-xs);
+    transition: border-color var(--duration-fast) var(--ease-out-quart), box-shadow var(--duration-fast) var(--ease-out-quart), background var(--duration-fast) var(--ease-out-quart);
+  }
+
+  .select-control:hover {
+    border-color: var(--color-border-strong);
+  }
+
+  .select-control:focus-visible {
+    border-color: var(--color-border-focus);
+    outline: none;
+    box-shadow: 0 0 0 4px oklch(var(--primary) / 0.1);
+  }
+
+  .select-control:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
   .alert {
     display: flex;
     align-items: center;
@@ -977,6 +1006,36 @@
   .tab.active .tab-badge {
     background: var(--color-brand-subtle);
     color: var(--color-brand);
+  }
+
+  .model-provider-item,
+  .models-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-md);
+    background: var(--color-surface-secondary);
+    padding: var(--space-3);
+    transition: border-color var(--duration-fast) var(--ease-out-quart), background var(--duration-fast) var(--ease-out-quart), transform var(--duration-fast) var(--ease-out-quart);
+  }
+
+  .model-provider-item:hover,
+  .models-row:hover {
+    border-color: var(--color-border-strong);
+    background: var(--color-surface-hover);
+  }
+
+  .models-table {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .models-row.default {
+    border-color: var(--color-brand-muted);
+    background: linear-gradient(90deg, var(--color-brand-subtle), var(--color-surface-secondary) 42%);
   }
 
   .version-item,

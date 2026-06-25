@@ -11,10 +11,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
 _llm = ChatOpenAI(
-    model=os.getenv("DASHSCOPE_MODEL", "qwen-plus"),
+    model=os.getenv("LLM_MODEL") or os.getenv("DASHSCOPE_MODEL", "qwen-plus"),
     temperature=0,
-    api_key=os.getenv("DASHSCOPE_API_KEY"),
-    base_url=os.getenv("DASHSCOPE_BASE_URL"),
+    api_key=os.getenv("LLM_API_KEY") or os.getenv("DASHSCOPE_API_KEY"),
+    base_url=os.getenv("LLM_BASE_URL") or os.getenv("DASHSCOPE_BASE_URL"),
 )
 _prompt = ChatPromptTemplate.from_messages(
     [
@@ -46,4 +46,5 @@ def invoke(input: dict, config: dict):
 
     # 非流式模式：返回完整 dict
     response = _chain.invoke({"input": question})
-    return {"answer": response.content, "model": os.getenv("DASHSCOPE_MODEL", "qwen-plus")}
+    model = os.getenv("LLM_MODEL") or os.getenv("DASHSCOPE_MODEL", "qwen-plus")
+    return {"answer": response.content, "model": model}

@@ -6,6 +6,7 @@ export type Agent = {
   id: string;
   name: string;
   description: string | null;
+  model_id: string | null;
   created_at: string;
   status: "stopped" | "building" | "running" | "crashed" | "idle";
   active_version: string | null;
@@ -29,6 +30,25 @@ export type ApiKey = {
 };
 
 export type ApiKeyWithSecret = ApiKey & { key: string };
+
+export type ModelProvider = {
+  id: string;
+  name: string;
+  base_url: string;
+  created_at: string;
+};
+
+export type LlmModel = {
+  id: string;
+  name: string;
+  provider_id: string;
+  provider_name: string | null;
+  model_id: string;
+  max_tokens: number;
+  temperature_default: number;
+  is_default: boolean;
+  created_at: string;
+};
 
 async function http<T>(
   path: string,
@@ -68,6 +88,50 @@ export const createAgent = (data: { name: string; description?: string }) =>
   http<Agent>("/api/v1/agents", { method: "POST", json: data });
 export const deleteAgent = (name: string) =>
   http<void>(`/api/v1/agents/${name}`, { method: "DELETE" });
+export const updateAgentModel = (name: string, model_id: string | null) =>
+  http<Agent>(`/api/v1/agents/${name}/model`, {
+    method: "PUT",
+    json: { model_id },
+  });
+
+// ===== Providers =====
+export const listProviders = () => http<ModelProvider[]>("/api/v1/providers");
+export const createProvider = (data: {
+  name: string;
+  api_key: string;
+  base_url: string;
+}) => http<ModelProvider>("/api/v1/providers", { method: "POST", json: data });
+export const updateProvider = (
+  id: string,
+  data: { name?: string; api_key?: string; base_url?: string }
+) => http<ModelProvider>(`/api/v1/providers/${id}`, { method: "PUT", json: data });
+export const deleteProvider = (id: string) =>
+  http<void>(`/api/v1/providers/${id}`, { method: "DELETE" });
+
+// ===== Models =====
+export const listModels = () => http<LlmModel[]>("/api/v1/models");
+export const createModel = (data: {
+  name: string;
+  provider_id: string;
+  model_id: string;
+  max_tokens?: number;
+  temperature_default?: number;
+  is_default?: boolean;
+}) => http<LlmModel>("/api/v1/models", { method: "POST", json: data });
+export const updateModel = (
+  id: string,
+  data: {
+    name?: string;
+    model_id?: string;
+    max_tokens?: number;
+    temperature_default?: number;
+    is_default?: boolean;
+  }
+) => http<LlmModel>(`/api/v1/models/${id}`, { method: "PUT", json: data });
+export const deleteModel = (id: string) =>
+  http<void>(`/api/v1/models/${id}`, { method: "DELETE" });
+export const setDefaultModel = (id: string) =>
+  http<LlmModel>(`/api/v1/models/${id}/set-default`, { method: "POST" });
 
 // ===== Versions =====
 export const listVersions = (name: string) =>

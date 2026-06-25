@@ -38,6 +38,7 @@ class ManagedAgent:
     restart_count: int = 0
     max_restarts: int = 5
     restart_base_delay: float = 2.0
+    llm_env: dict[str, str] = field(default_factory=dict)
     last_invoke_at: float = field(default_factory=time.time)
     # 令牌桶限流
     rate_limit_qps: float = 10.0
@@ -105,6 +106,7 @@ class ManagedAgent:
                 "LANGFUSE_SECRET_KEY": os.environ.get("LANGFUSE_SECRET_KEY", ""),
                 "LANGFUSE_BASE_URL": os.environ.get("LANGFUSE_BASE_URL", ""),
             }
+            env_vars.update(self.llm_env)
 
             # 启动容器
             self.port = find_free_port()
@@ -156,6 +158,7 @@ class ManagedAgent:
                     entrypoint=self.entrypoint,
                     port=port,
                     log_path=log_path,
+                    extra_env=self.llm_env,
                 )
 
                 if not wait_for_health(port, timeout=30):

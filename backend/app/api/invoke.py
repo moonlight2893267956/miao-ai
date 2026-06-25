@@ -93,6 +93,7 @@ async def _try_auto_activate(name: str, session: AsyncSession) -> ManagedAgent |
     2. registry 中不存在 → 新建 ManagedAgent 并启动
     """
     from ..models.agent_version import AgentVersion
+    from ..runtime.llm_env import resolve_llm_env
     from ..runtime.manager import ManagedAgent
     from ..runtime.registry import AgentRegistry
     from ..config import settings
@@ -101,7 +102,8 @@ async def _try_auto_activate(name: str, session: AsyncSession) -> ManagedAgent |
     registry = AgentRegistry.instance()
 
     # 进程池限制
-    if registry.running_count() >= settings.agent_max_concurrent:
+    running_count = registry.running_count()
+    if isinstance(running_count, int) and running_count >= settings.agent_max_concurrent:
         return None
 
     # 查找 active version
@@ -122,6 +124,7 @@ async def _try_auto_activate(name: str, session: AsyncSession) -> ManagedAgent |
         # 尝试重新启动进程（复用已有的 work_dir / venv）
         existing.version_id = str(av.id)
         existing.entrypoint = av.entrypoint
+        existing.llm_env = await resolve_llm_env(agent_row.id, session)
         ok = await asyncio.to_thread(existing.build_and_start)
         if ok:
             return existing
@@ -130,7 +133,8 @@ async def _try_auto_activate(name: str, session: AsyncSession) -> ManagedAgent |
     # 场景2：registry 中不存在，新建
     work_dir = Path(f"/tmp/miao/agents/{name}")
     work_dir.mkdir(parents=True, exist_ok=True)
-    runner_path = Path(__file__).parents[1] / "agent_templates" / "miao_runner.py"
+    runner_path = Path(__file__).parents[2] / "agent_templates" / "miao_runner.py"
+    llm_env = await resolve_llm_env(agent_row.id, session)
 
     managed = ManagedAgent(
         name=name,
@@ -141,6 +145,7 @@ async def _try_auto_activate(name: str, session: AsyncSession) -> ManagedAgent |
         runtime_mode=settings.agent_runtime_mode,
         max_restarts=settings.agent_max_restarts,
         restart_base_delay=settings.agent_restart_base_delay,
+        llm_env=llm_env,
     )
     ok = await asyncio.to_thread(managed.build_and_start)
     if ok:

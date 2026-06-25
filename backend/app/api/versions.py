@@ -18,6 +18,7 @@ from ..config import settings
 from ..db import get_session
 from ..models.agent_version import AgentVersion
 from ..runtime.manager import ManagedAgent
+from ..runtime.llm_env import resolve_llm_env
 from ..runtime.registry import AgentRegistry
 from ..runtime.storage import download_zip, get_zip_stream, upload_zip
 from ..schemas.agent_version import AgentVersionRead
@@ -220,6 +221,7 @@ async def activate_version(
 
     # 创建 ManagedAgent 并 build+start
     runner_path = Path(__file__).parents[2] / "agent_templates" / "miao_runner.py"
+    llm_env = await resolve_llm_env(agent.id, session)
     managed = ManagedAgent(
         name=name,
         version_id=str(target.id),
@@ -227,6 +229,7 @@ async def activate_version(
         runner_path=runner_path,
         entrypoint=target.entrypoint,
         runtime_mode=settings.agent_runtime_mode,
+        llm_env=llm_env,
     )
     ok = await asyncio.to_thread(managed.build_and_start)
     if not ok:

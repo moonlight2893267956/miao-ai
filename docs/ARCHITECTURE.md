@@ -1,20 +1,22 @@
 # Miao AI — 系统架构文档
 
-> **版本**: v0.1.0 | **最后更新**: 2026-06-23
+> **版本**: v0.2.0 | **最后更新**: 2026-06-25
 
 ---
 
 ## 1. 概述
 
-Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 Python agent 代码（zip 包），平台自动构建独立运行环境（隔离 venv 或 Docker 容器），然后通过 REST API 调用 agent。全程由 Langfuse 记录追踪（trace）。
+Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 Python agent 代码（zip 包），平台自动构建独立运行环境（隔离 venv 或 Docker 容器），然后通过 REST API 调用 agent。支持灵活配置多模型提供商，Agent 可按需绑定不同模型。全程由 Langfuse 记录追踪（trace）。
 
 **核心特性**:
 - 每个 agent 运行在独立子进程（venv 模式）或 Docker 容器中
+- **多模型管理**: 注册 OpenAI 兼容的模型提供商（Provider），配置多个 LLM 模型，Agent 可绑定指定模型或使用全局默认
 - 支持普通调用和 SSE 流式输出
 - 异步任务提交 + Webhook 回调
 - 进程崩溃自动重启、空闲超时回收（invoke 时自动唤醒）、per-agent 令牌桶限流
 - 启动时自动恢复已激活的 agent
 - 代码包存储于腾讯云 COS，业务数据存 Neon PostgreSQL
+- 提供商 API Key 使用 Fernet 对称加密存储，运行时解密注入子进程
 
 ---
 
@@ -24,7 +26,7 @@ Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 
 ┌──────────────────────────────────────────────────────────────┐
 │                      前端 (Next.js 14)                       │
 │                  localhost:3000                               │
-│  Agents 列表 / Agent 详情 / 版本管理 / API Key 管理 / 试运行  │
+│  Agents / 模型管理 / 版本管理 / API Key 管理 / 试运行 / Trace │
 └────────────────────────┬─────────────────────────────────────┘
                          │ REST (JSON) / SSE
                          ▼
@@ -36,6 +38,10 @@ Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 
 │  │ agents   │  │ versions │  │  keys    │  │   invoke    │ │
 │  │  CRUD    │  │ 上传/激活│  │颁发/吊销 │  │调用/流式/异步│ │
 │  └──────────┘  └──────────┘  └──────────┘  └─────────────┘ │
+│  ┌──────────────┐  ┌──────────────────┐                     │
+│  │  providers   │  │     models       │  ← 模型管理层 新增  │
+│  │  CRUD + 加密 │  │ CRUD + 默认/绑定 │                     │
+│  └──────────────┘  └──────────────────┘                     │
 │                                                              │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │               Agent Runtime Layer                     │   │
@@ -47,14 +53,18 @@ Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 
 │  │  │  Venv     │  │  Docker    │  │   Watchdog     │   │   │
 │  │  │ Builder   │  │  Builder   │  │ (崩溃重启/回收) │   │   │
 │  │  └───────────┘  └────────────┘  └────────────────┘   │   │
+│  │  ┌──────────────────────────┐                        │   │
+│  │  │    llm_env (环境解析)     │  ← 模型 → 运行时桥梁   │   │
+│  │  │ resolve_llm_env(agent_id)│                        │   │
+│  │  └──────────────────────────┘                        │   │
 │  └──────────────────────────────────────────────────────┘   │
 └──────────┬──────────┬─────────────┬─────────────┬───────────┘
            │          │             │             │
            ▼          ▼             ▼             ▼
-    ┌──────────┐ ┌───────┐  ┌───────────┐  ┌──────────┐
-    │  Neon PG │ │  COS  │  │ Langfuse  │  │ DashScope│
-    │ (业务DB) │ │(zip包)│  │  (trace)  │  │  (LLM)   │
-    └──────────┘ └───────┘  └───────────┘  └──────────┘
+    ┌──────────┐ ┌───────┐  ┌───────────┐  ┌──────────────┐
+    │  Neon PG │ │  COS  │  │ Langfuse  │  │ 任意 OpenAI  │
+    │ (业务DB) │ │(zip包)│  │  (trace)  │  │ 兼容 LLM     │
+    └──────────┘ └───────┘  └───────────┘  └──────────────┘
 ```
 
 ---
@@ -74,44 +84,60 @@ Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 
 | **限流** | 令牌桶 (token bucket) | per-agent QPS 控制 |
 | **前端框架** | Next.js 14 (App Router) | React + TypeScript |
 | **UI 组件** | Radix UI + Tailwind CSS | 无障碍 UI 组件库 |
-| **LLM Provider** | DashScope (通义千问) | qwen-plus 等模型 |
+| **LLM Provider** | DashScope / 任意 OpenAI 兼容 API | 支持多提供商注册，Agent 灵活绑定 |
+| **加密** | cryptography (Fernet) | 提供商 API Key 对称加密存储 |
 
 ---
 
 ## 4. 数据模型
 
 ```
-┌──────────────┐       ┌──────────────────┐       ┌──────────────┐
-│    Agent     │ 1───N │  AgentVersion    │ 1───1 │  ManagedAgent │
-│              │       │                  │       │  (内存对象)   │
-│ id (UUID)    │       │ id (UUID)        │       │               │
-│ name (str)   │       │ agent_id (FK)    │       │ name          │
-│ description  │       │ version (str)    │       │ port          │
-│ created_at   │       │ artifact_url     │       │ status        │
-│              │       │ entrypoint       │       │ process       │
-└──────────────┘       │ is_active (bool) │       │ _docker       │
-       │               │ status           │       └──────────────┘
-       │               │ created_at       │
-       │ 1───N         └──────────────────┘
-       │
-       ▼
-┌──────────────┐       ┌──────────────────┐
-│   ApiKey     │       │   InvokeTask     │
-│              │       │                  │
-│ id (UUID)    │       │ id (UUID)        │
-│ agent_id(FK) │       │ agent_id (FK)    │
-│ key_hash     │       │ agent_name       │
-│ label        │       │ request_id       │
-│ revoked_at   │       │ webhook_url      │
-│ created_at   │       │ status           │
-└──────────────┘       │ input_payload    │
-                       │ output_payload   │
-                       │ error_message    │
-                       │ trace_id         │
-                       │ webhook_delivered│
-                       │ created_at       │
-                       │ completed_at     │
-                       └──────────────────┘
+┌────────────────┐     ┌──────────────────┐     ┌──────────────┐
+│    Agent       │ 1─N │  AgentVersion    │ 1─1 │ ManagedAgent │
+│                │     │                  │     │ (内存对象)    │
+│ id (UUID)      │     │ id (UUID)        │     │              │
+│ name (str)     │     │ agent_id (FK)    │     │ name         │
+│ description    │     │ version (str)    │     │ port         │
+│ model_id (FK)  │     │ artifact_url     │     │ status       │
+│ created_at     │     │ entrypoint       │     │ process      │
+└───────┬────────┘     │ is_active        │     │ _docker      │
+        │              │ status           │     └──────────────┘
+        │              │ created_at       │
+        │ N──1         └──────────────────┘
+        │
+        ▼
+┌────────────────┐     ┌──────────────────┐     ┌──────────────────────┐
+│   LlmModel     │ N──1│  ModelProvider   │     │    ApiKey            │
+│                │     │                  │     │                      │
+│ id (UUID)      │     │ id (UUID)        │     │ id (UUID)            │
+│ name           │     │ name (UNIQUE)    │     │ agent_id (FK)        │
+│ provider_id(FK)│     │ api_key_encrypted│     │ key_hash             │
+│ model_id       │     │ base_url         │     │ label                │
+│ max_tokens     │     │ created_at       │     │ revoked_at           │
+│ temperature    │     └──────────────────┘     │ created_at           │
+│ is_default     │                              └──────────────────────┘
+│ created_at     │
+└────────────────┘
+        │ 1──N
+        │
+        ▼
+┌──────────────────┐
+│   InvokeTask     │
+│                  │
+│ id (UUID)        │
+│ agent_id (FK)    │
+│ agent_name       │
+│ request_id       │
+│ webhook_url      │
+│ status           │
+│ input_payload    │
+│ output_payload   │
+│ error_message    │
+│ trace_id         │
+│ webhook_delivered│
+│ created_at       │
+│ completed_at     │
+└──────────────────┘
 ```
 
 ### 4.1 Agent（机器人）
@@ -120,6 +146,7 @@ Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 
 | id | UUID | 主键 |
 | name | String(64) | 唯一名称（用作 URL path） |
 | description | Text | 可选描述 |
+| model_id | UUID (FK) | 绑定的 LLM 模型（可空，NULL 时使用全局默认） |
 | created_at | DateTime | 创建时间 |
 
 ### 4.2 AgentVersion（版本）
@@ -131,10 +158,31 @@ Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 
 | artifact_url | String | COS 上的 zip 包 key |
 | entrypoint | String | 入口函数（如 "agent:invoke"） |
 | is_active | Boolean | 是否当前激活版本 |
-| status | String | building / running / crashed |
+| status | String | building / running / crashed / stopped |
 | created_at | DateTime | 创建时间 |
 
-### 4.3 ApiKey（API 密钥）
+### 4.3 ModelProvider（模型提供商）— 新增
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | UUID | 主键 |
+| name | String(128) | 唯一名称（UNIQUE INDEX），如 "DashScope" |
+| api_key_encrypted | Text | Fernet 加密的 API Key（**永不返回明文**） |
+| base_url | Text | OpenAI 兼容 API 地址 |
+| created_at | DateTime | 创建时间 |
+
+### 4.4 LlmModel（LLM 模型）— 新增
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | UUID | 主键 |
+| name | String(128) | 显示名，如 "Qwen Plus" |
+| provider_id | UUID (FK) | 所属提供商（CASCADE 删除） |
+| model_id | String(128) | 提供商侧模型标识，如 "qwen-plus" |
+| max_tokens | Integer | 默认值 4096 |
+| temperature_default | Float | 默认值 0.7 |
+| is_default | Boolean | 全局默认模型（独占，仅一个可为 True） |
+| created_at | DateTime | 创建时间 |
+
+### 4.5 ApiKey（API 密钥）
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | id | UUID | 主键 |
@@ -143,7 +191,7 @@ Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 
 | label | String | 备注标签 |
 | revoked_at | DateTime | 吊销时间（NULL = 有效） |
 
-### 4.4 InvokeTask（异步调用任务）
+### 4.6 InvokeTask（异步调用任务）
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | id | UUID | 主键 |
@@ -194,7 +242,25 @@ Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 
 | POST | `/agents/{name}/keys` | 创建 key（返回原文，仅一次） |
 | DELETE | `/agents/{name}/keys/{id}` | 吊销 key |
 
-### 5.5 调用（Invoke）
+### 5.5 模型管理（新增）
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/providers` | 列出所有模型提供商 |
+| POST | `/providers` | 创建提供商（API Key 加密存储） |
+| PUT | `/providers/{id}` | 更新提供商（API Key 可选更新） |
+| DELETE | `/providers/{id}` | 删除提供商（级联删除其模型，解绑 Agent） |
+| GET | `/models` | 列出所有 LLM 模型（含 provider_name） |
+| POST | `/models` | 创建模型（验证 provider_id 存在） |
+| PUT | `/models/{id}` | 更新模型 |
+| DELETE | `/models/{id}` | 删除模型（解绑 Agent → model_id=NULL） |
+| POST | `/models/{id}/set-default` | 设为全局默认模型（独占） |
+
+### 5.6 Agent 模型绑定（新增）
+| 方法 | 路径 | 鉴权 | 说明 |
+|------|------|------|------|
+| PUT | `/agents/{name}/model` | Bearer | 更新 Agent 的模型绑定 |
+
+### 5.7 调用（Invoke）
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
 | POST | `/agents/{name}/invoke` | Bearer | 同步调用 |
@@ -266,6 +332,27 @@ Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 
 - **async generator** → 逐 chunk SSE token 事件
 - **sync generator** → 单线程迭代，`await asyncio.sleep(0)` 让出事件循环
 
+#### LLM 环境解析（`backend/app/runtime/llm_env.py`）— 新增
+
+`resolve_llm_env(agent_id, session)` 在 Agent 激活/恢复时解析运行所需的 LLM 环境变量。
+
+**三级回退链**:
+```
+Agent 绑定的模型 (agent.model_id)
+  └→ 查询 LlmModel + ModelProvider → decrypt_secret(api_key)
+  └→ 注入 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
+
+全局默认模型 (is_default=True)
+  └→ 同上
+
+.env DashScope 配置 (dashscope_api_key / dashscope_base_url / dashscope_model)
+  └→ 无 DB 配置时的兜底回退
+```
+
+注入的环境变量同时包含 `LLM_*` 和 `DASHSCOPE_*` 别名，确保向后兼容现有 agent 模板。
+
+**调用入口**: `activate_version()` / `_recover_active_agents()` / `_try_auto_activate()`
+
 #### VenvBuilder（`backend/app/runtime/venv.py`）
 按需构建隔离 Python 虚拟环境：
 1. `uv venv` 创建 venv
@@ -294,11 +381,12 @@ Docker 模式支持：
 ┌─────────────────┐
 │ 1) 下载 zip     │  COS → /tmp/miao/agents/{name}/source.zip
 │ 2) 解压代码     │  清空旧代码（保留 .venv / .build_hash）
-│ 3) 构建 venv    │  VenvBuilder.needs_build() → uv pip install
-│ 4) 启动子进程   │  spawn_agent_process() → Popen
-│ 5) 健康检查     │  wait_for_health(port, timeout=30)
-│ 6) 注册到内存   │  AgentRegistry.set(managed)
-│ 7) 更新 DB      │  is_active=True, status=running
+│ 3) 解析 LLM 环境│  resolve_llm_env(agent.id)
+│ 4) 构建 venv    │  VenvBuilder.needs_build() → uv pip install
+│ 5) 启动子进程   │  spawn_agent_process() → Popen（注入 LLM 环境变量）
+│ 6) 健康检查     │  wait_for_health(port, timeout=30)
+│ 7) 注册到内存   │  AgentRegistry.set(managed)
+│ 8) 更新 DB      │  is_active=True, status=running
 └─────────────────┘
        │
        ▼
@@ -317,13 +405,45 @@ Docker 模式支持：
                  └─ 失败则回写 is_active=False
 ```
 
-### 6.4 安全与隔离
+### 6.4 模型管理运行时数据流（新增）
+
+```
+人机交互                              DB 存储                       Agent 运行时
+─────────                            ──────                       ───────────
+
+[注册 Provider]                     model_providers               resolve_llm_env()
+ POST /providers ──────────────────► INSERT (api_key 加密)
+ {name, api_key, base_url}
+
+[注册 Model]                        llm_models
+ POST /models ─────────────────────► INSERT
+ {name, provider_id, model_id, ...}
+
+[绑定 Agent 到 Model]               agents.model_id
+ PUT /agents/{name}/model ─────────► UPDATE model_id = xxx
+
+[激活/唤醒 Agent]                                              MATCH 优先级:
+ activate_version()                                             ① agent.model_id ──► 加载该 LlmModel
+   └─ resolve_llm_env(agent.id) ──► 查 Agent.model_id ──►     ② is_default=True ─► 全局默认模型
+   └─ decrypt_secret(api_key)      ──► LlmModel ──►            ③ .env 回退 ────────► dashscope_*
+   └─ 注入环境变量                                       │
+                            ┌──────────────────────────┘
+                            ▼
+              LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
+              DASHSCOPE_API_KEY / DASHSCOPE_BASE_URL / DASHSCOPE_MODEL
+                            │
+                            ▼
+                    子进程 Popen(env={...})
+```
+
+### 6.5 安全与隔离
 
 | 维度 | 措施 |
 |------|------|
 | **API 鉴权** | Bearer token（SHA-256 哈希存储，原文不存 DB） |
 | **Agent 隔离** | 独立子进程（独立进程组，SIGTERM → SIGKILL）或 Docker 容器 |
 | **密钥安全** | Docker 模式 ENV 通过 `-e` 运行时注入，不写入镜像层 |
+| **提供商 API Key** | Fernet 对称加密存储（`ENCRYPTION_KEY`），仅在运行时解密注入子进程，API 响应永不返回 |
 | **代码隔离** | 每个 agent 独立工作目录 + 独立 venv |
 | **资源限制** | Docker 模式 `--cpus=1.0 --memory=512m`；venv 模式无额外限制 |
 | **并发控制** | `agent_max_concurrent=10`，超过返回 429 |
@@ -343,6 +463,8 @@ frontend/src/
 │   │   ├── page.tsx            # Agent 列表页（/agents）
 │   │   └── [name]/
 │   │       └── page.tsx        # Agent 详情页（/agents/{name}）
+│   ├── models/
+│   │   └── page.tsx            # 模型管理页（/models）— 新增
 │   └── traces/
 │       └── page.tsx            # Trace 查看页（/traces）
 ├── components/
@@ -359,7 +481,16 @@ frontend/src/
 | 状态栏 | 实时显示 agent 状态（running/crashed/stopped） |
 | 版本管理 | 上传 zip、激活版本、查看版本列表 |
 | API Key | 创建/吊销 key，复制新 key |
+| 模型绑定 | 下拉选择器为 Agent 绑定 LLM 模型（新增） |
 | 试运行 | 输入 JSON → 调用 invoke/stream，查看输出和 trace |
+
+### 模型管理页面功能（新增）
+| 区域 | 功能 |
+|------|------|
+| Provider 列表 | 显示所有提供商名称和 Base URL |
+| Model 列表 | 显示模型名/provider/model_id/参数，默认模型标记 Star，支持"设为默认" |
+| 创建/编辑 | 内嵌表单：Provider（name/api_key/base_url）、Model（name/provider/model_id/max_tokens/temperature/is_default） |
+| 删除 | 确认后删除（Provider 级联删模型+解绑 Agent，Model 解绑 Agent 回退默认） |
 
 ---
 
@@ -475,10 +606,13 @@ TENCENT_REGION=ap-beijing
 TENCENT_BUCKET=miao-agent-1355651432
 COS_ENDPOINT=https://cos.ap-beijing.myqcloud.com
 
-# DashScope LLM
+# DashScope LLM（无 DB 模型配置时的回退）
 DASHSCOPE_API_KEY=sk-...
 DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 DASHSCOPE_MODEL=qwen-plus
+
+# 模型管理加密密钥（Fernet，用于加密 Provider API Key）
+ENCRYPTION_KEY=...
 ```
 
 ### Agent 运行时配置

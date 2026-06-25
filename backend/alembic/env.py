@@ -12,7 +12,7 @@ from alembic import context
 
 # 导入 settings 和所有模型（让 Base.metadata 认识它们）
 from app.config import settings
-from app.models import Agent, AgentVersion, ApiKey  # noqa: F401
+from app.models import Agent, AgentVersion, ApiKey, InvokeTask, LlmModel, ModelProvider  # noqa: F401
 from app.models.base import Base
 
 config = context.config

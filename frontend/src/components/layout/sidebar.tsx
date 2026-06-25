@@ -7,8 +7,8 @@ import { ThemeToggle } from "@/components/layout/theme-toggle";
 import {
   LayoutDashboard,
   Activity,
+  Cpu,
   Settings,
-  Settings2,
   Users,
 } from "lucide-react";
 
@@ -21,7 +21,7 @@ const NAV_ITEMS = [
     label: "Agent 管理",
     items: [
       { href: "/agents", label: "Agents", icon: Users, badge: "1", exact: true },
-      { href: "/agents/qwen-chat", label: "Agent Detail", icon: Settings2, detailOnly: true },
+      { href: "/models", label: "模型管理", icon: Cpu, exact: true },
     ],
   },
   {
@@ -39,7 +39,6 @@ export function Sidebar() {
 
   function isActive(item: (typeof NAV_ITEMS)[number]["items"][number]) {
     if ("disabled" in item && item.disabled) return false;
-    if ("detailOnly" in item && item.detailOnly) return pathname.startsWith("/agents/");
     const href = item.href;
     if (href === "/") return pathname === "/";
     if ("exact" in item && item.exact) return pathname === href;

@@ -11,13 +11,18 @@ class AgentBase(BaseModel):
 
 
 class AgentCreate(AgentBase):
-    pass
+    model_id: uuid.UUID | None = None
 
 
 class AgentRead(AgentBase):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
+    model_id: uuid.UUID | None = None
     created_at: datetime
     # 实时从 Runtime Registry 查：stopped / building / running / crashed / idle
     status: str = "stopped"
     active_version: str | None = None
+
+
+class AgentModelUpdate(BaseModel):
+    model_id: uuid.UUID | None = None

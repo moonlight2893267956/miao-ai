@@ -10,8 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_session
 from ..models.agent import Agent
 from ..models.agent_version import AgentVersion
+from ..models.llm_model import LlmModel
 from ..runtime.registry import AgentRegistry
-from ..schemas.agent import AgentCreate, AgentRead
+from ..schemas.agent import AgentCreate, AgentModelUpdate, AgentRead
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -36,6 +37,7 @@ async def _with_status(
         id=agent.id,
         name=agent.name,
         description=agent.description,
+        model_id=agent.model_id,
         created_at=agent.created_at,
         status=managed.status if managed else "stopped",
         active_version=active_version,
@@ -52,8 +54,38 @@ async def create_agent(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Agent '{payload.name}' already exists",
         )
-    agent = Agent(name=payload.name, description=payload.description)
+    if payload.model_id is not None:
+        model = await session.get(LlmModel, payload.model_id)
+        if not model:
+            raise HTTPException(status_code=404, detail="Model not found")
+    agent = Agent(
+        name=payload.name,
+        description=payload.description,
+        model_id=payload.model_id,
+    )
     session.add(agent)
+    await session.commit()
+    await session.refresh(agent)
+    return await _with_status(agent, AgentRegistry.instance(), session)
+
+
+@router.put("/{name}/model", response_model=AgentRead)
+async def update_agent_model(
+    name: str,
+    payload: AgentModelUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> AgentRead:
+    result = await session.execute(select(Agent).where(Agent.name == name))
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Agent '{name}' not found"
+        )
+    if payload.model_id is not None:
+        model = await session.get(LlmModel, payload.model_id)
+        if not model:
+            raise HTTPException(status_code=404, detail="Model not found")
+    agent.model_id = payload.model_id
     await session.commit()
     await session.refresh(agent)
     return await _with_status(agent, AgentRegistry.instance(), session)

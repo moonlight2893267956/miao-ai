@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -14,6 +14,7 @@ from .base import Base
 if TYPE_CHECKING:
     from .agent_version import AgentVersion
     from .api_key import ApiKey
+    from .llm_model import LlmModel
 
 
 class Agent(Base):
@@ -25,6 +26,12 @@ class Agent(Base):
     # 只允许小写字母、数字、连字符（URL/文件名友好）
     name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("llm_models.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -35,3 +42,4 @@ class Agent(Base):
     keys: Mapped[list["ApiKey"]] = relationship(
         "ApiKey", back_populates="agent", cascade="all, delete-orphan"
     )
+    model: Mapped["LlmModel | None"] = relationship("LlmModel", back_populates="agents")

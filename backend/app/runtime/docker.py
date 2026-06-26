@@ -100,19 +100,46 @@ class DockerBuilder:
         log.info("docker.image.built tag=%s", self.image_tag)
 
 
-class DockerRunner:
-    """管理单个 agent 容器的生命周期。"""
+# Agent 容器内部监听的端口（miao_runner.py）
+AGENT_INTERNAL_PORT = 8080
 
-    def __init__(self, image_tag: str, container_name: str, port: int,
-                 cpu: str = "1.0", memory: str = "512m", network: str = "bridge",
-                 env_vars: dict | None = None):
+
+class DockerRunner:
+    """管理单个 agent 容器的生命周期。
+
+    支持两种网络模式：
+    1. host_port + 宿主机端口映射：使用默认 bridge 网络，wait_for_health 用 127.0.0.1:host_port
+       （仅在 backend 跑在宿主机时有效）
+    2. shared_network + 容器名：agent 容器加入共享网络，wait_for_health 用 container_name:8080
+       （推荐，backend 在容器内时使用）
+    """
+
+    def __init__(
+        self,
+        image_tag: str,
+        container_name: str,
+        cpu: str = "1.0",
+        memory: str = "512m",
+        env_vars: dict | None = None,
+        host_port: int | None = None,
+        shared_network: str | None = None,
+    ):
         self.image_tag = image_tag
         self.container_name = container_name
-        self.port = port
         self.cpu = cpu
         self.memory = memory
-        self.network = network
         self.env_vars = env_vars or {}
+        self.host_port = host_port  # 宿主机端口（仅当用端口映射模式时）
+        self.shared_network = shared_network  # 共享网络名（推荐用这个）
+        # 计算 health check URL
+        if shared_network:
+            # 通过容器名 + 容器内部端口，DNS 解析
+            self.health_url = f"http://{container_name}:{AGENT_INTERNAL_PORT}/health"
+        elif host_port is not None:
+            # 通过宿主端口（仅当 backend 在宿主机上时有效）
+            self.health_url = f"http://127.0.0.1:{host_port}/health"
+        else:
+            self.health_url = None
 
     def start(self) -> None:
         """docker run -d ..."""
@@ -131,14 +158,22 @@ class DockerRunner:
             if v:  # 只传入非空值
                 env_args.extend(["-e", f"{k}={v}"])
 
+        # 构建网络参数
+        network_args: list[str] = []
+        if self.shared_network:
+            network_args = ["--network", self.shared_network]
+        else:
+            network_args = ["--network", "bridge"]
+            if self.host_port is not None:
+                network_args.extend(["-p", f"{self.host_port}:{AGENT_INTERNAL_PORT}"])
+
         result = subprocess.run(
             [
                 "docker", "run", "-d",
                 "--name", self.container_name,
                 "--cpus", self.cpu,
                 "--memory", self.memory,
-                "--network", self.network,
-                "-p", f"{self.port}:8080",
+                *network_args,
                 *env_args,
                 "--restart", "no",
                 self.image_tag,
@@ -147,7 +182,12 @@ class DockerRunner:
         )
         if result.returncode != 0:
             raise RuntimeError(f"docker run failed: {result.stderr.strip()}")
-        log.info("docker.container.started name=%s port=%d", self.container_name, self.port)
+        log.info(
+            "docker.container.started name=%s network=%s health_url=%s",
+            self.container_name,
+            self.shared_network or "bridge",
+            self.health_url,
+        )
 
     def stop(self) -> None:
         """docker stop + docker rm。"""

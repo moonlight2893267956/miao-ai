@@ -17,10 +17,43 @@ from .process import (
     kill_process,
     spawn_agent_process,
     wait_for_health,
+    wait_for_health_url,
 )
 from .venv import VenvBuilder
 
 log = logging.getLogger(__name__)
+
+
+def _detect_shared_network() -> str | None:
+    """检测 backend 是否在 docker 网络里运行，如果是返回网络名。
+
+    通过检查 hostname 找到当前 container 的网络名（docker-compose 创建的 <project>_default）。
+    如果不在 container 里运行（直接在宿主机），返回 None（用默认 bridge + 端口映射）。
+    """
+    import os
+    import subprocess
+
+    try:
+        # 找到自己所在的 container（通过 hostname 匹配）
+        hostname = os.environ.get("HOSTNAME") or ""
+        if not hostname:
+            return None
+        result = subprocess.run(
+            ["docker", "inspect", hostname, "--format", "{{json .NetworkSettings.Networks}}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        import json
+        networks = json.loads(result.stdout)
+        # 优先选择 docker-compose 创建的网络（通常是 miao-ai_default 或类似）
+        # 排除 bridge / host / none
+        candidates = [k for k in networks.keys() if k not in ("bridge", "host", "none")]
+        if candidates:
+            return candidates[0]
+    except Exception:
+        return None
+    return None
 
 
 @dataclass
@@ -50,6 +83,8 @@ class ManagedAgent:
     runtime_mode: str = "venv"
     _docker: "DockerRunner | None" = field(default=None, init=False)
     _image_tag: str | None = field(default=None, init=False)  # 已构建的镜像 tag
+    _container_name: str | None = field(default=None, init=False)  # 容器名（用于 DNS 解析）
+    _health_url: str | None = field(default=None, init=False)  # agent health check URL
 
     def __post_init__(self):
         self._tokens = float(self.rate_limit_burst)
@@ -62,7 +97,7 @@ class ManagedAgent:
     def _start_docker_container(self) -> bool:
         """仅启动容器（不重新 build），用于 idle 唤醒场景。"""
         import os
-        from .docker import DockerRunner, docker_available
+        from .docker import AGENT_INTERNAL_PORT, DockerRunner, docker_available
 
         if not docker_available():
             self.status = "crashed"
@@ -74,6 +109,7 @@ class ManagedAgent:
             return self._build_and_start_docker()
 
         container_name = f"miao-{self.name}"
+        self._container_name = container_name
         env_vars = {
             "LANGFUSE_PUBLIC_KEY": os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
             "LANGFUSE_SECRET_KEY": os.environ.get("LANGFUSE_SECRET_KEY", ""),
@@ -82,28 +118,30 @@ class ManagedAgent:
         env_vars.update(self.llm_env)
 
         try:
-            self.port = find_free_port()
+            # 共享 docker 网络（agent 容器 join miao-backend 所在网络，用 container name DNS 解析）
+            shared_network = _detect_shared_network()
             runner = DockerRunner(
                 image_tag=self._image_tag,
                 container_name=container_name,
-                port=self.port,
                 cpu="1.0",
                 memory="512m",
                 env_vars=env_vars,
+                shared_network=shared_network,
             )
             runner.start()
+            self._health_url = runner.health_url
 
-            if not wait_for_health(self.port, timeout=60):
+            if not wait_for_health_url(runner.health_url, timeout=60):
                 runner.stop()
                 self.status = "crashed"
-                self.last_error = "docker container health check timeout"
+                self.last_error = f"docker container health check timeout (url={runner.health_url})"
                 return False
 
             self._docker = runner
             self.status = "running"
             self.last_invoke_at = time.time()
-            log.info("docker.container.resumed agent=%s port=%d image=%s",
-                     self.name, self.port, self._image_tag)
+            log.info("docker.container.resumed agent=%s health_url=%s image=%s",
+                     self.name, runner.health_url, self._image_tag)
             return True
         except Exception as e:
             self.status = "crashed"
@@ -142,6 +180,7 @@ class ManagedAgent:
         self.last_error = None
         image_tag = f"miao-agent:{self.name}-{self.version_id[:8]}"
         container_name = f"miao-{self.name}"
+        self._container_name = container_name
 
         try:
             # 生成 Dockerfile + .dockerignore + 复制 runner
@@ -166,28 +205,29 @@ class ManagedAgent:
             }
             env_vars.update(self.llm_env)
 
-            # 启动容器
-            self.port = find_free_port()
+            # 共享 docker 网络（agent 容器 join miao-backend 所在网络）
+            shared_network = _detect_shared_network()
             runner = DockerRunner(
                 image_tag=image_tag,
                 container_name=container_name,
-                port=self.port,
                 cpu="1.0",
                 memory="512m",
                 env_vars=env_vars,
+                shared_network=shared_network,
             )
             runner.start()
+            self._health_url = runner.health_url
 
-            if not wait_for_health(self.port, timeout=60):
+            if not wait_for_health_url(runner.health_url, timeout=60):
                 runner.stop()
                 self.status = "crashed"
-                self.last_error = "docker container health check timeout"
+                self.last_error = f"docker container health check timeout (url={runner.health_url})"
                 return False
 
             self._docker = runner
             self.status = "running"
             self.last_invoke_at = time.time()
-            log.info("docker.agent.started agent=%s port=%d", self.name, self.port)
+            log.info("docker.agent.started agent=%s health_url=%s", self.name, runner.health_url)
             return True
         except Exception as e:
             self.status = "crashed"
@@ -318,6 +358,17 @@ class ManagedAgent:
             return self.status == "running" and self._docker is not None
         return self.status == "running" and self.process is not None
 
+    def _invoke_base_url(self) -> str:
+        """获取 invoke 调用的 base URL。
+
+        Docker 模式：用容器名 + 内部端口（共享网络 DNS 解析）
+        venv 模式：127.0.0.1:host_port
+        """
+        if self._docker and self._container_name:
+            from .docker import AGENT_INTERNAL_PORT
+            return f"http://{self._container_name}:{AGENT_INTERNAL_PORT}"
+        return f"http://127.0.0.1:{self.port}"
+
     def invoke(self, payload: dict, timeout: float = 60.0, config: dict | None = None) -> dict:
         if not self._is_running():
             raise RuntimeError(f"agent {self.name} not running (status={self.status})")
@@ -325,7 +376,7 @@ class ManagedAgent:
         try:
             with httpx.Client(timeout=timeout) as client:
                 r = client.post(
-                    f"http://127.0.0.1:{self.port}/invoke",
+                    f"{self._invoke_base_url()}/invoke",
                     json={"input": payload, "config": config or {}},
                 )
                 r.raise_for_status()
@@ -348,7 +399,7 @@ class ManagedAgent:
             with httpx.Client(timeout=timeout) as client:
                 with client.stream(
                     "POST",
-                    f"http://127.0.0.1:{self.port}/invoke/stream",
+                    f"{self._invoke_base_url()}/invoke/stream",
                     json={"input": payload, "config": config or {}},
                 ) as r:
                     r.raise_for_status()

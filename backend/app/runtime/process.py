@@ -65,10 +65,16 @@ def kill_process(proc: subprocess.Popen, timeout: float = 5.0) -> None:
 
 
 def wait_for_health(port: int, timeout: float = 30.0) -> bool:
+    """通过宿主端口检查 health（仅在 backend 跑在宿主机上时有效）。"""
+    return wait_for_health_url(f"http://127.0.0.1:{port}/health", timeout)
+
+
+def wait_for_health_url(url: str, timeout: float = 30.0) -> bool:
+    """通过 URL 检查 health（支持容器名 DNS 解析、宿主机端口等）。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            r = httpx.get(f"http://127.0.0.1:{port}/health", timeout=2.0)
+            r = httpx.get(url, timeout=2.0)
             if r.status_code == 200:
                 return True
         except Exception:

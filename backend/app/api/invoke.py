@@ -121,11 +121,14 @@ async def _try_auto_activate(name: str, session: AsyncSession) -> ManagedAgent |
     # 场景1：registry 中已有该 agent（可能是 idle/stopped/crashed 状态）
     existing = registry.get(name)
     if existing:
-        # 尝试重新启动进程（复用已有的 work_dir / venv）
-        existing.version_id = str(av.id)
-        existing.entrypoint = av.entrypoint
+        # 更新环境变量（模型可能已更换）
         existing.llm_env = await resolve_llm_env(agent_row.id, session)
-        ok = await asyncio.to_thread(existing.build_and_start)
+        # Docker 模式：如果有已构建镜像，只启动容器（跳过 build）
+        # venv 模式：build_and_start 内部会检查 needs_build
+        if existing.runtime_mode == "docker" and existing._image_tag:
+            ok = await asyncio.to_thread(existing._start_docker_container)
+        else:
+            ok = await asyncio.to_thread(existing.build_and_start)
         if ok:
             return existing
         return None

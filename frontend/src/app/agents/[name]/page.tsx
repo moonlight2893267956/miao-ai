@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { ModelSelector } from "@/components/ui/model-selector";
 import {
   type Agent,
   type AgentVersion,
@@ -326,23 +327,13 @@ export default function AgentDetailPage() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <div className="flex min-w-[260px] items-center gap-2">
-              <Cpu className="h-4 w-4 shrink-0 text-[var(--color-text-tertiary)]" />
-              <select
-                aria-label="Agent model"
-                className="select-control"
-                value={agent.model_id ?? ""}
-                onChange={(e) => onModelChange(e.target.value)}
-                disabled={busy}
-              >
-                <option value="">{systemDefaultLabel}</option>
-                {models.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.provider_name ?? "Provider"} / {model.name}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <ModelSelector
+              models={models}
+              value={agent.model_id ?? null}
+              systemDefaultLabel={systemDefaultLabel}
+              disabled={busy}
+              onChange={onModelChange}
+            />
             <StatusBadge status={agent.status} />
             <Button
               variant="outline"

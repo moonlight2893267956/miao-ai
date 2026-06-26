@@ -39,7 +39,11 @@ WORK_ROOT = Path("/tmp/miao/agents")
 
 
 async def _recover_active_agents() -> None:
-    """启动时从 DB 恢复所有 is_active 的 agent，启动子进程。"""
+    """启动时从 DB 恢复所有 is_active 的 agent，启动子进程。
+
+    注意：Docker 模式下 build 较慢（pip install），此函数应在后台执行，
+    不阻塞 FastAPI lifespan 启动。
+    """
     log.info("miao.recovery.start")
     registry = AgentRegistry.instance()
     runner_path = Path(__file__).parents[1] / "agent_templates" / "miao_runner.py"
@@ -176,14 +180,20 @@ async def _agent_watchdog() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("miao.startup", debug=settings.debug)
-    # Phase 2: 恢复 is_active 的 agent
-    await _recover_active_agents()
+    # Phase 2: 后台恢复 is_active 的 agent（不阻塞启动，Docker build 较慢）
+    recovery_task = asyncio.create_task(_recover_active_agents())
     # 启动后台 watchdog
     watchdog_task = asyncio.create_task(_agent_watchdog())
     # 创建异步任务 worker
     app.state.task_worker = TaskWorker(max_workers=settings.invoke_async_max_workers)
     yield
     log.info("miao.shutdown")
+    # 停止 recovery（如果还在跑）
+    recovery_task.cancel()
+    try:
+        await recovery_task
+    except asyncio.CancelledError:
+        pass
     # 停止 worker（等待运行中任务完成）
     await asyncio.to_thread(app.state.task_worker.shutdown)
     # 停止 watchdog 和所有 agent

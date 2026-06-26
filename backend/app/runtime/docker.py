@@ -41,6 +41,18 @@ def docker_available() -> bool:
         return False
 
 
+def image_exists(image_tag: str) -> bool:
+    """检查 Docker 镜像是否已存在本地。"""
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", image_tag],
+            capture_output=True, timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def build_dockerfile(agent_dir: Path, runner_path: Path, env_vars: dict | None = None) -> Path:
     """基于模板生成 Dockerfile 到 agent_dir，并生成 .dockerignore。
 

@@ -1,9 +1,17 @@
 FROM python:3.12-slim
 WORKDIR /app
+
+# 第一层：安装 runner 的固定依赖（变化少，可缓存）
 COPY miao_runner.py /app/miao_runner.py
-COPY agent.py /app/agent.py
+RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com \
+    fastapi uvicorn pydantic langfuse
+
+# 第二层：安装用户 requirements.txt（只在依赖变更时重建）
 COPY requirements.txt* /app/
-RUN pip install --no-cache-dir fastapi uvicorn pydantic langfuse
-RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
+RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -r requirements.txt; fi
+
+# 第三层：复制用户代码（变更最频繁，放在最后）
+COPY agent.py /app/agent.py
+
 EXPOSE 8080
 CMD ["python", "/app/miao_runner.py", "/app", "agent:invoke", "8080"]

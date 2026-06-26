@@ -49,6 +49,7 @@ class ManagedAgent:
     # Docker 模式
     runtime_mode: str = "venv"
     _docker: "DockerRunner | None" = field(default=None, init=False)
+    _image_tag: str | None = field(default=None, init=False)  # 已构建的镜像 tag
 
     def __post_init__(self):
         self._tokens = float(self.rate_limit_burst)
@@ -57,6 +58,58 @@ class ManagedAgent:
         if self.runtime_mode == "docker":
             return self._build_and_start_docker()
         return self._build_and_start_venv()
+
+    def _start_docker_container(self) -> bool:
+        """仅启动容器（不重新 build），用于 idle 唤醒场景。"""
+        import os
+        from .docker import DockerRunner, docker_available
+
+        if not docker_available():
+            self.status = "crashed"
+            self.last_error = "docker not available"
+            return False
+
+        if not self._image_tag:
+            # 没有已构建的镜像 tag，必须走完整 build 流程
+            return self._build_and_start_docker()
+
+        container_name = f"miao-{self.name}"
+        env_vars = {
+            "LANGFUSE_PUBLIC_KEY": os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
+            "LANGFUSE_SECRET_KEY": os.environ.get("LANGFUSE_SECRET_KEY", ""),
+            "LANGFUSE_BASE_URL": os.environ.get("LANGFUSE_BASE_URL", ""),
+        }
+        env_vars.update(self.llm_env)
+
+        try:
+            self.port = find_free_port()
+            runner = DockerRunner(
+                image_tag=self._image_tag,
+                container_name=container_name,
+                port=self.port,
+                cpu="1.0",
+                memory="512m",
+                env_vars=env_vars,
+            )
+            runner.start()
+
+            if not wait_for_health(self.port, timeout=60):
+                runner.stop()
+                self.status = "crashed"
+                self.last_error = "docker container health check timeout"
+                return False
+
+            self._docker = runner
+            self.status = "running"
+            self.last_invoke_at = time.time()
+            log.info("docker.container.resumed agent=%s port=%d image=%s",
+                     self.name, self.port, self._image_tag)
+            return True
+        except Exception as e:
+            self.status = "crashed"
+            self.last_error = f"docker start failed: {e}"
+            log.exception("docker.container.resume_failed agent=%s", self.name)
+            return False
 
     def _build_and_start_venv(self) -> bool:
         """构建 venv + 启动子进程。"""
@@ -78,7 +131,7 @@ class ManagedAgent:
     def _build_and_start_docker(self) -> bool:
         """构建 Docker 镜像 + 启动容器。"""
         import os
-        from .docker import DockerBuilder, DockerRunner, build_dockerfile, docker_available
+        from .docker import DockerBuilder, DockerRunner, build_dockerfile, docker_available, image_exists
 
         if not docker_available():
             self.status = "crashed"
@@ -92,13 +145,18 @@ class ManagedAgent:
 
         try:
             # 生成 Dockerfile + .dockerignore + 复制 runner
-            # env_vars 不再写入 Dockerfile，改为 docker run -e 传入
             build_dockerfile(self.work_dir, self.runner_path)
 
-            # 每次激活强制构建镜像（--no-cache），避免代码更新后用旧镜像
-            builder = DockerBuilder(self.work_dir, image_tag)
-            log.info("docker.build agent=%s tag=%s", self.name, image_tag)
-            builder.build(no_cache=True)
+            # 检查镜像是否已存在：同 version_id 的镜像如果已经构建过，跳过 build
+            if image_exists(image_tag):
+                log.info("docker.image.skip_build agent=%s tag=%s (image exists)", self.name, image_tag)
+            else:
+                builder = DockerBuilder(self.work_dir, image_tag)
+                log.info("docker.build agent=%s tag=%s", self.name, image_tag)
+                builder.build(no_cache=True)
+
+            # 记录已构建的 image tag，idle 唤醒时可跳过 build
+            self._image_tag = image_tag
 
             # 准备 env_vars（通过 docker run -e 传入，不写入镜像）
             env_vars = {
@@ -211,7 +269,8 @@ class ManagedAgent:
         self.restart_count += 1
         # 按 runtime_mode 分发重启
         if self.runtime_mode == "docker":
-            ok = self._build_and_start_docker()
+            # idle 唤醒 / 崩溃重启：如果有已构建镜像，只启动容器不重新 build
+            ok = self._start_docker_container()
         else:
             ok = self._start_process()
         if ok:
@@ -222,6 +281,7 @@ class ManagedAgent:
         if self._docker:
             self._docker.stop()
             self._docker = None
+            # 注意：保留 self._image_tag，idle 唤醒时可直接 docker run 而不重新 build
         elif self.process:
             if self.process.stdout and hasattr(self.process.stdout, "close"):
                 try:

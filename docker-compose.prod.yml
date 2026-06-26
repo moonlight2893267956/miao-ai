@@ -7,8 +7,9 @@ services:
     env_file:
       - .env
     environment:
-      agent_runtime_mode: venv
-      AGENT_RUNTIME_MODE: venv
+      # 从 .env 读取 agent_runtime_mode；如未设置则使用 docker 模式
+      agent_runtime_mode: ${AGENT_RUNTIME_MODE:-docker}
+      AGENT_RUNTIME_MODE: ${AGENT_RUNTIME_MODE:-docker}
     ports:
       - "127.0.0.1:18000:8000"
     volumes:

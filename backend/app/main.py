@@ -221,12 +221,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS：允许本地前端开发（3000 端口）
+# CORS：允许本地前端开发（3000 端口）和生产域名
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "https://agent.yunmiao.site",
+        "http://agent.yunmiao.site",
     ],
     allow_credentials=True,
     allow_methods=["*"],

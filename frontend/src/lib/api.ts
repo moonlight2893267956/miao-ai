@@ -50,6 +50,16 @@ export type LlmModel = {
   created_at: string;
 };
 
+export type AuthUser = {
+  id: string;
+  username: string;
+  created_at: string;
+};
+
+export type AuthStatus = {
+  user: AuthUser;
+};
+
 async function http<T>(
   path: string,
   init?: RequestInit & { json?: unknown }
@@ -63,8 +73,16 @@ async function http<T>(
     headers["Content-Type"] = "application/json";
     body = JSON.stringify(init.json);
   }
-  const r = await fetch(`${API_BASE}${path}`, { ...init, headers, body });
+  const r = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers,
+    body,
+    credentials: init?.credentials ?? "include",
+  });
   if (!r.ok) {
+    if (typeof window !== "undefined" && r.status === 401 && !path.includes("/invoke")) {
+      window.dispatchEvent(new Event("miao-auth-expired"));
+    }
     let detail: unknown = null;
     try {
       detail = await r.json();
@@ -80,6 +98,12 @@ async function http<T>(
   if (r.status === 204) return undefined as T;
   return (await r.json()) as T;
 }
+
+// ===== Auth =====
+export const login = (data: { username: string; password: string }) =>
+  http<AuthStatus>("/api/v1/auth/login", { method: "POST", json: data });
+export const getCurrentAuth = () => http<AuthStatus>("/api/v1/auth/me");
+export const logout = () => http<void>("/api/v1/auth/logout", { method: "POST" });
 
 // ===== Agents =====
 export const listAgents = () => http<Agent[]>("/api/v1/agents");
@@ -163,7 +187,8 @@ export const downloadVersionArtifact = async (
   version: string
 ): Promise<void> => {
   const r = await fetch(
-    `${API_BASE}/api/v1/agents/${encodeURIComponent(name)}/versions/${encodeURIComponent(version)}/download`
+    `${API_BASE}/api/v1/agents/${encodeURIComponent(name)}/versions/${encodeURIComponent(version)}/download`,
+    { credentials: "include" }
   );
   if (!r.ok) {
     let detail: string;
@@ -226,6 +251,7 @@ export async function* invokeAgentStream(
 ): AsyncGenerator<StreamEvent> {
   const r = await fetch(`${API_BASE}/api/v1/agents/${name}/invoke/stream`, {
     method: "POST",
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,

@@ -16,72 +16,78 @@ def _unique_name() -> str:
 
 
 @pytest.mark.asyncio
-async def test_create_and_get_agent() -> None:
-    name = _unique_name()
+async def test_management_api_requires_login() -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        # 初始列表可能非空（其他测试残留），只验证创建后能取到
-        r = await ac.post("/api/v1/agents", json={"name": name, "description": "x"})
-        assert r.status_code == 201, r.text
-        created = r.json()
-        assert created["name"] == name
-        assert "id" in created
-
-        r = await ac.get(f"/api/v1/agents/{name}")
-        assert r.status_code == 200
-        assert r.json()["id"] == created["id"]
+        r = await ac.get("/api/v1/agents")
+        assert r.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_duplicate_agent_409() -> None:
+async def test_create_and_get_agent(logged_in_client: AsyncClient) -> None:
     name = _unique_name()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        r = await ac.post("/api/v1/agents", json={"name": name})
-        assert r.status_code == 201
-        # 第二次同名 → 409
-        r = await ac.post("/api/v1/agents", json={"name": name})
-        assert r.status_code == 409
+    ac = logged_in_client
+    # 初始列表可能非空（其他测试残留），只验证创建后能取到
+    r = await ac.post("/api/v1/agents", json={"name": name, "description": "x"})
+    assert r.status_code == 201, r.text
+    created = r.json()
+    assert created["name"] == name
+    assert "id" in created
+
+    r = await ac.get(f"/api/v1/agents/{name}")
+    assert r.status_code == 200
+    assert r.json()["id"] == created["id"]
 
 
 @pytest.mark.asyncio
-async def test_nonexistent_agent_404() -> None:
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        r = await ac.get(f"/api/v1/agents/{_unique_name()}")
-        assert r.status_code == 404
+async def test_duplicate_agent_409(logged_in_client: AsyncClient) -> None:
+    name = _unique_name()
+    ac = logged_in_client
+    r = await ac.post("/api/v1/agents", json={"name": name})
+    assert r.status_code == 201
+    # 第二次同名 → 409
+    r = await ac.post("/api/v1/agents", json={"name": name})
+    assert r.status_code == 409
 
 
 @pytest.mark.asyncio
-async def test_create_key_returns_plain_once() -> None:
-    name = _unique_name()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        await ac.post("/api/v1/agents", json={"name": name})
-        # 无 body 创建
-        r = await ac.post(f"/api/v1/agents/{name}/keys")
-        assert r.status_code == 201
-        k = r.json()
-        assert k["key"].startswith("miao_")
-        assert k["label"] is None
-
-        # list 应该能看到，但不返回明文
-        r = await ac.get(f"/api/v1/agents/{name}/keys")
-        assert r.status_code == 200
-        keys = r.json()
-        assert len(keys) == 1
-        assert "key" not in keys[0]
-        assert keys[0]["id"] == k["id"]
+async def test_nonexistent_agent_404(logged_in_client: AsyncClient) -> None:
+    r = await logged_in_client.get(f"/api/v1/agents/{_unique_name()}")
+    assert r.status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_revoke_key() -> None:
+async def test_create_key_returns_plain_once(logged_in_client: AsyncClient) -> None:
     name = _unique_name()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        await ac.post("/api/v1/agents", json={"name": name})
-        r = await ac.post(f"/api/v1/agents/{name}/keys", json={"label": "to-revoke"})
-        key_id = r.json()["id"]
+    ac = logged_in_client
+    await ac.post("/api/v1/agents", json={"name": name})
+    # 无 body 创建
+    r = await ac.post(f"/api/v1/agents/{name}/keys")
+    assert r.status_code == 201
+    k = r.json()
+    assert k["key"].startswith("miao_")
+    assert k["label"] is None
 
-        r = await ac.delete(f"/api/v1/agents/{name}/keys/{key_id}")
-        assert r.status_code == 204
+    # list 应该能看到，但不返回明文
+    r = await ac.get(f"/api/v1/agents/{name}/keys")
+    assert r.status_code == 200
+    keys = r.json()
+    assert len(keys) == 1
+    assert "key" not in keys[0]
+    assert keys[0]["id"] == k["id"]
 
-        # 撤销后 list 不再返回
-        r = await ac.get(f"/api/v1/agents/{name}/keys")
-        assert r.status_code == 200
-        assert r.json() == []
+
+@pytest.mark.asyncio
+async def test_revoke_key(logged_in_client: AsyncClient) -> None:
+    name = _unique_name()
+    ac = logged_in_client
+    await ac.post("/api/v1/agents", json={"name": name})
+    r = await ac.post(f"/api/v1/agents/{name}/keys", json={"label": "to-revoke"})
+    key_id = r.json()["id"]
+
+    r = await ac.delete(f"/api/v1/agents/{name}/keys/{key_id}")
+    assert r.status_code == 204
+
+    # 撤销后 list 不再返回
+    r = await ac.get(f"/api/v1/agents/{name}/keys")
+    assert r.status_code == 200
+    assert r.json() == []

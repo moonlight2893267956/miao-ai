@@ -10,17 +10,19 @@ from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, update
 
 from .api.agents import router as agents_router
+from .api.auth import router as auth_router
 from .api.health import router as health_router
 from .api.invoke import router as invoke_router
 from .api.keys import router as keys_router
 from .api.models import router as models_router
 from .api.providers import router as providers_router
 from .api.versions import router as versions_router
+from .auth import get_current_user
 from .config import settings
 from .db import AsyncSessionLocal, engine
 from .logging import configure_logging, get_logger
@@ -231,12 +233,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+login_required = [Depends(get_current_user)]
+
 app.include_router(health_router, prefix="/api/v1")
-app.include_router(agents_router, prefix="/api/v1")
-app.include_router(versions_router, prefix="/api/v1")
-app.include_router(keys_router, prefix="/api/v1")
-app.include_router(providers_router, prefix="/api/v1")
-app.include_router(models_router, prefix="/api/v1")
+app.include_router(auth_router, prefix="/api/v1")
+app.include_router(agents_router, prefix="/api/v1", dependencies=login_required)
+app.include_router(versions_router, prefix="/api/v1", dependencies=login_required)
+app.include_router(keys_router, prefix="/api/v1", dependencies=login_required)
+app.include_router(providers_router, prefix="/api/v1", dependencies=login_required)
+app.include_router(models_router, prefix="/api/v1", dependencies=login_required)
 app.include_router(invoke_router, prefix="/api/v1")
 
 

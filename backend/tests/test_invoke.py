@@ -46,20 +46,20 @@ def mock_stopped_agent():
 
 
 @pytest.mark.asyncio
-async def test_invoke_missing_auth() -> None:
+async def test_invoke_missing_auth(logged_in_client: AsyncClient) -> None:
     name = _unique_name()
+    await logged_in_client.post("/api/v1/agents", json={"name": name})
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        await ac.post("/api/v1/agents", json={"name": name})
         r = await ac.post(f"/api/v1/agents/{name}/invoke", json={"input": {"q": "x"}})
-        assert r.status_code == 401
-        assert "Authorization" in r.json()["detail"]
+    assert r.status_code == 401
+    assert "Authorization" in r.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_invoke_invalid_key() -> None:
+async def test_invoke_invalid_key(logged_in_client: AsyncClient) -> None:
     name = _unique_name()
+    await logged_in_client.post("/api/v1/agents", json={"name": name})
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        await ac.post("/api/v1/agents", json={"name": name})
         r = await ac.post(
             f"/api/v1/agents/{name}/invoke",
             headers={"Authorization": "Bearer miao_wrongkey"},
@@ -70,15 +70,14 @@ async def test_invoke_invalid_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_invoke_revoked_key() -> None:
+async def test_invoke_revoked_key(logged_in_client: AsyncClient) -> None:
     name = _unique_name()
+    await logged_in_client.post("/api/v1/agents", json={"name": name})
+    r = await logged_in_client.post(f"/api/v1/agents/{name}/keys", json={"label": "to-revoke"})
+    key = r.json()["key"]
+    key_id = r.json()["id"]
+    await logged_in_client.delete(f"/api/v1/agents/{name}/keys/{key_id}")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        await ac.post("/api/v1/agents", json={"name": name})
-        r = await ac.post(f"/api/v1/agents/{name}/keys", json={"label": "to-revoke"})
-        key = r.json()["key"]
-        key_id = r.json()["id"]
-        # 撤销
-        await ac.delete(f"/api/v1/agents/{name}/keys/{key_id}")
         # 撤销后用这个 key → 401
         r = await ac.post(
             f"/api/v1/agents/{name}/invoke",
@@ -89,12 +88,12 @@ async def test_invoke_revoked_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_invoke_agent_not_running(mock_stopped_agent) -> None:
+async def test_invoke_agent_not_running(mock_stopped_agent, logged_in_client: AsyncClient) -> None:
     name = _unique_name()
+    await logged_in_client.post("/api/v1/agents", json={"name": name})
+    r = await logged_in_client.post(f"/api/v1/agents/{name}/keys")
+    key = r.json()["key"]
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        await ac.post("/api/v1/agents", json={"name": name})
-        r = await ac.post(f"/api/v1/agents/{name}/keys")
-        key = r.json()["key"]
         r = await ac.post(
             f"/api/v1/agents/{name}/invoke",
             headers={"Authorization": f"Bearer {key}"},
@@ -105,13 +104,16 @@ async def test_invoke_agent_not_running(mock_stopped_agent) -> None:
 
 
 @pytest.mark.asyncio
-async def test_invoke_success_passes_input_and_metadata(mock_running_agent) -> None:
+async def test_invoke_success_passes_input_and_metadata(
+    mock_running_agent,
+    logged_in_client: AsyncClient,
+) -> None:
     name = _unique_name()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        await ac.post("/api/v1/agents", json={"name": name})
-        r = await ac.post(f"/api/v1/agents/{name}/keys")
-        key = r.json()["key"]
+    await logged_in_client.post("/api/v1/agents", json={"name": name})
+    r = await logged_in_client.post(f"/api/v1/agents/{name}/keys")
+    key = r.json()["key"]
 
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         r = await ac.post(
             f"/api/v1/agents/{name}/invoke",
             headers={"Authorization": f"Bearer {key}"},

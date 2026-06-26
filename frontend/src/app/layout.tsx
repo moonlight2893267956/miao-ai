@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { AuthGate } from "@/components/auth/auth-gate";
 import { HeaderStats } from "@/components/layout/header-stats";
 import { Sidebar } from "@/components/layout/sidebar";
 import "./globals.css";
@@ -42,29 +43,31 @@ export default function RootLayout({
         />
       </head>
       <body className="font-sans antialiased">
-        <div className="app-shell">
-          <Sidebar />
-          <div className="main-content">
-            <header className="top-header">
-              <div className="header-left">
-                <div className="breadcrumb">
-                <nav className="flex items-center gap-1.5">
-                  <Link href="/" className="transition-colors hover:text-foreground">
-                    Home
-                  </Link>
-                </nav>
+        <AuthGate>
+          <div className="app-shell">
+            <Sidebar />
+            <div className="main-content">
+              <header className="top-header">
+                <div className="header-left">
+                  <div className="breadcrumb">
+                    <nav className="flex items-center gap-1.5">
+                      <Link href="/" className="transition-colors hover:text-foreground">
+                        Home
+                      </Link>
+                    </nav>
+                  </div>
                 </div>
-              </div>
-              <HeaderStats />
-            </header>
-            <main className="page-content">
-              {children}
-            </main>
-            <footer className="page-footer">
-              <p>Miao AI — Self-hosted AI Agent Platform · Made with love for developers</p>
-            </footer>
+                <HeaderStats />
+              </header>
+              <main className="page-content">
+                {children}
+              </main>
+              <footer className="page-footer">
+                <p>Miao AI — Self-hosted AI Agent Platform · Made with love for developers</p>
+              </footer>
+            </div>
           </div>
-        </div>
+        </AuthGate>
       </body>
     </html>
   );

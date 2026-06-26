@@ -2,12 +2,15 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useAuth } from "@/components/auth/auth-gate";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
 import {
   LayoutDashboard,
   Activity,
   Cpu,
+  LogOut,
   Settings,
   Users,
 } from "lucide-react";
@@ -36,6 +39,7 @@ const NAV_ITEMS = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const { user, logout } = useAuth();
 
   function isActive(item: (typeof NAV_ITEMS)[number]["items"][number]) {
     if ("disabled" in item && item.disabled) return false;
@@ -105,6 +109,19 @@ export function Sidebar() {
       </nav>
 
       <div className="sidebar-footer">
+        <div className="sidebar-user">
+          <span className="sidebar-user-avatar">{user?.username.slice(0, 2).toUpperCase()}</span>
+          <span className="sidebar-user-name">{user?.username}</span>
+          <Button
+            variant="ghost"
+            size="icon"
+            title="退出登录"
+            aria-label="退出登录"
+            onClick={() => void logout()}
+          >
+            <LogOut />
+          </Button>
+        </div>
         <ThemeToggle />
         <p className="text-center text-[0.65rem] text-muted-foreground/50">
           Miao AI v0.2.0

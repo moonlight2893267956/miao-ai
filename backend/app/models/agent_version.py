@@ -44,7 +44,7 @@ class AgentVersion(Base):
     entrypoint: Mapped[str] = mapped_column(String(64), nullable=False, default="agent:invoke")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="building")
-    # building / running / crashed / idle
+    # building / running / crashed / idle / stopped
     build_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

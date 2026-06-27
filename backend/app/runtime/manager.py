@@ -66,7 +66,7 @@ class ManagedAgent:
     venv_dir: Path | None = None
     port: int = 0
     process: subprocess.Popen | None = None
-    status: str = "building"  # building / running / crashed / idle
+    status: str = "building"  # building / running / crashed / idle / stopped
     last_error: str | None = None
     restart_count: int = 0
     max_restarts: int = 5
@@ -330,7 +330,9 @@ class ManagedAgent:
                     pass
             kill_process(self.process)
             self.process = None
-        self.status = "idle"
+        # stopped 含义：进程/容器已停（可能是用户手动 stop，也可能是 watchdog idle_stop）
+        # 下次 invoke 会通过 _try_auto_activate 自动唤醒
+        self.status = "stopped"
         self.port = 0
 
     def _refill_tokens(self) -> None:

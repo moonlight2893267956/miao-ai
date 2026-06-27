@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { AlertCircle, ArrowLeft, Play, Upload, KeyRound, Copy, Trash2, RefreshCw, Download, Loader2, CheckCircle2, Cpu } from "lucide-react";
+import { AlertCircle, ArrowLeft, Play, Upload, KeyRound, Copy, Trash2, RefreshCw, Download, Loader2, CheckCircle2, Cpu, StopCircle } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,6 +27,7 @@ import {
   listModels,
   listVersions,
   revokeKey,
+  stopAgent as apiStopAgent,
   updateAgentModel,
   uploadVersion,
 } from "@/lib/api";
@@ -130,6 +131,25 @@ export default function AgentDetailPage() {
       router.push("/agents");
     } catch (e) {
       setActionError((e as Error).message);
+    }
+  }
+
+  async function onStopAgent() {
+    if (
+      !confirm(
+        `停止 agent "${name}"？容器/进程会被杀掉，但 DB 定义（agent/versions/keys）保留。下次 invoke 时会自动唤醒。`
+      )
+    )
+      return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      const updated = await apiStopAgent(name);
+      setAgent(updated);
+    } catch (e) {
+      setActionError((e as Error).message);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -348,7 +368,18 @@ export default function AgentDetailPage() {
                 }`}
               />
             </Button>
-            <Button variant="ghost" size="icon" onClick={onDeleteAgent}>
+            {agent.status !== "stopped" && (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onStopAgent}
+                disabled={busy}
+                title="Stop (DB definition kept, auto-wake on next invoke)"
+              >
+                <StopCircle className="h-4 w-4 text-[var(--color-warning-icon)]" />
+              </Button>
+            )}
+            <Button variant="ghost" size="icon" onClick={onDeleteAgent} title="Delete agent (cascades to versions & keys)">
               <Trash2 className="h-4 w-4 text-[var(--color-error-icon)]" />
             </Button>
           </div>

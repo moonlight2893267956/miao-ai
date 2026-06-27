@@ -112,6 +112,8 @@ export const createAgent = (data: { name: string; description?: string }) =>
   http<Agent>("/api/v1/agents", { method: "POST", json: data });
 export const deleteAgent = (name: string) =>
   http<void>(`/api/v1/agents/${name}`, { method: "DELETE" });
+export const stopAgent = (name: string) =>
+  http<Agent>(`/api/v1/agents/${encodeURIComponent(name)}/stop`, { method: "POST" });
 export const updateAgentModel = (name: string, model_id: string | null) =>
   http<Agent>(`/api/v1/agents/${name}/model`, {
     method: "PUT",

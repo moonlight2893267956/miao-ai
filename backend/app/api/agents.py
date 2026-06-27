@@ -129,3 +129,45 @@ async def delete_agent(name: str, session: AsyncSession = Depends(get_session)) 
         )
     await session.delete(agent)
     await session.commit()
+
+
+@router.post("/{name}/stop", response_model=AgentRead)
+async def stop_agent(
+    name: str, session: AsyncSession = Depends(get_session)
+) -> AgentRead:
+    """停掉 agent 容器/进程，DB 定义（agent / versions / keys）全部保留。
+
+    下次 invoke 会通过 `_try_auto_activate` 自动唤醒（复用 image_exists / needs_build 缓存）。
+    幂等：重复调用不报错，直接返回当前 stopped 状态。
+    """
+    registry = AgentRegistry.instance()
+
+    # 1. 找 DB 定义；不存在 → 404
+    result = await session.execute(select(Agent).where(Agent.name == name))
+    agent = result.scalar_one_or_none()
+    if agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Agent '{name}' not found"
+        )
+
+    # 2. 如果 agent 在 registry 里（running / building / crashed / idle）→ 杀容器/进程
+    #    stop() 内部会把 managed.status 改成 "stopped"，但仍保留在 registry
+    managed = registry.get(name)
+    if managed is not None:
+        await asyncio.to_thread(managed.stop)
+
+    # 3. 同步 agent_versions.status = "stopped"（DB 持久化标记，幂等）
+    av_result = await session.execute(
+        select(AgentVersion)
+        .where(AgentVersion.agent_id == agent.id)
+        .where(AgentVersion.is_active.is_(True))
+    )
+    av = av_result.scalar_one_or_none()
+    if av is not None and av.status != "stopped":
+        av.status = "stopped"
+        session.add(av)
+        await session.commit()
+        await session.refresh(av)
+
+    # 4. 重新读 managed（stop() 后 status="stopped"），返回组装结果
+    return await _with_status(agent, registry, session)

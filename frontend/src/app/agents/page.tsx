@@ -2,12 +2,12 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Bot, Plus, Trash2, RefreshCw, Search } from "lucide-react";
+import { Bot, Plus, Trash2, RefreshCw, Search, StopCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { StatusBadge } from "@/components/ui/status-badge";
-import { type Agent, createAgent, deleteAgent, listAgents } from "@/lib/api";
+import { type Agent, createAgent, deleteAgent, listAgents, stopAgent } from "@/lib/api";
 
 const AVATAR_STYLES: Record<
   Agent["status"],
@@ -66,6 +66,21 @@ export default function AgentsPage() {
     if (!confirm(`Delete agent "${name}"? This stops the running process.`)) return;
     try {
       await deleteAgent(name);
+      await refresh();
+    } catch (e) {
+      alert((e as Error).message);
+    }
+  }
+
+  async function onStop(name: string) {
+    if (
+      !confirm(
+        `Stop agent "${name}"? The container/process will be killed, but the DB definition is kept. It will auto-wake on next invoke.`
+      )
+    )
+      return;
+    try {
+      await stopAgent(name);
       await refresh();
     } catch (e) {
       alert((e as Error).message);

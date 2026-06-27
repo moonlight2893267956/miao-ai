@@ -10,6 +10,8 @@ services:
         https_proxy: ${BUILD_HTTPS_PROXY:-${BUILD_HTTP_PROXY:-}}
         APT_MIRROR: ${BUILD_APT_MIRROR:-http://mirrors.aliyun.com/debian}
         APT_SECURITY_MIRROR: ${BUILD_APT_SECURITY_MIRROR:-http://mirrors.aliyun.com/debian-security}
+        PIP_INDEX_URL: ${BUILD_PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+        PIP_TRUSTED_HOST: ${BUILD_PIP_TRUSTED_HOST:-mirrors.aliyun.com}
     container_name: miao-backend
     env_file:
       - .env

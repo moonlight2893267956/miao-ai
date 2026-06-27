@@ -39,10 +39,26 @@ if [ -d "$HOME/.nvm/versions/node" ]; then
   fi
 fi
 
-# ===== 凭证检查 =====
-if [ ! -f .env ]; then
-  echo "❌ 找不到 .env"
-  echo "   先 cp .env.example .env 并填入凭证（参考 infra/CLOUD_SETUP.md）"
+# ===== 凭证加载（本地凭证隔离生产）=====
+# 优先 .env.local（gitignore，本地开发用）→ 隔离生产 Langfuse/Neon
+# 回退根 .env（生产凭证）→ 会污染生产数据，仅应急用
+if [ -f .env.local ]; then
+  echo "▶ 加载本地凭证 .env.local（隔离生产 Langfuse/Neon）"
+  set -a
+  # shellcheck disable=SC1091
+  source .env.local
+  set +a
+elif [ -f .env ]; then
+  echo "⚠️  未找到 .env.local，回退到根 .env（会写到生产 Langfuse/Neon）"
+  echo "   建议：cp .env.local.example .env.local 并填本地凭证"
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+else
+  echo "❌ 找不到任何 .env 文件"
+  echo "   选项 1（推荐）：cp .env.local.example .env.local 并填本地凭证"
+  echo "   选项 2（生产应急）：cp .env.example .env 并填凭证"
   exit 1
 fi
 

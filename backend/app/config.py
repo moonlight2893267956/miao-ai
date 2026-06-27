@@ -10,14 +10,29 @@ from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 加载根目录的 .env（如果存在），后端和 demo 共用凭证
+# 加载顺序：
+#   1. 先加载根 .env（生产凭证，docker-compose.prod.yml 用的同一份）
+#   2. 再加载 .env.local（本地开发凭证，gitignore）→ override=True 覆盖生产值
+# 优先级：os.environ > .env.local > 根 .env
 _ROOT_ENV = Path(__file__).parents[2] / ".env"
+_LOCAL_ENV = Path(__file__).parents[2] / ".env.local"
 if _ROOT_ENV.exists():
     load_dotenv(_ROOT_ENV)
+if _LOCAL_ENV.exists():
+    load_dotenv(_LOCAL_ENV, override=True)
 
 
 class Settings(BaseSettings):
+    # pydantic-settings v2 多 env_file 时按 list 顺序加载，**后者覆盖前者**。
+    # 官方文档："The files will be loaded in order, with each file overriding the previous one."
+    # 所以 .env.local 放最后一个，优先级最高。
+    _env_files = (
+        [str(_ROOT_ENV), str(_LOCAL_ENV)]
+        if _LOCAL_ENV.exists() and _ROOT_ENV.exists()
+        else ([str(_LOCAL_ENV)] if _LOCAL_ENV.exists() else (str(_ROOT_ENV) if _ROOT_ENV.exists() else None))
+    )
     model_config = SettingsConfigDict(
-        env_file=str(_ROOT_ENV) if _ROOT_ENV.exists() else None,
+        env_file=_env_files,
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",

@@ -226,6 +226,7 @@ Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 
 | POST | `/agents` | 创建 agent |
 | GET | `/agents` | 列出所有 agent（含实时 status） |
 | GET | `/agents/{name}` | 获取单个 agent |
+| POST | `/agents/{name}/stop` | 停 agent 容器/进程，DB 定义保留，幂等；下次 invoke 自动唤醒 |
 | DELETE | `/agents/{name}` | 删除 agent（停止进程 + CASCADE） |
 
 ### 5.3 版本管理
@@ -404,6 +405,13 @@ Docker 模式支持：
                  ├─ 重新 build + start
                  └─ 失败则回写 is_active=False
 ```
+
+**`stopped` 状态语义**：`ManagedAgent.status` 值域 `building / running / crashed / idle / stopped`，其中：
+
+- `stopped` = 容器/进程已停，**agent 仍在 registry**（保留 image_tag / work_dir，下次 invoke 复用）
+- 两种来源：用户调 `POST /agents/{name}/stop`（手动）、watchdog 检测到 idle > 300s（自动）
+- DB 侧同步：`agent_versions.status` 也会被 API handler 改成 `"stopped"`（持久化标记，watchdog 路径不写）
+- 下次 invoke：走 `_try_auto_activate`（`api/invoke.py:88`）自动唤醒，docker 模式复用 `_image_tag` 跳过 build，venv 模式复用 `needs_build` 缓存
 
 ### 6.4 模型管理运行时数据流（新增）
 
@@ -586,7 +594,38 @@ frontend/src/
 
 ## 9. 配置体系
 
-配置文件: 根目录 `.env`
+### 环境分层（本地 vs 生产隔离）
+
+为避免本地开发污染生产 Langfuse trace 和 Neon DB，项目采用**双 env_file 分层**方案：
+
+| 文件 | gitignore | 用途 | 加载方 |
+|---|---|---|---|
+| 根 `.env` | ✅ 已忽略 | 生产凭证 | `docker-compose.prod.yml` `env_file:` 注入容器 |
+| `.env.local` | ✅ 已忽略（`.env.*.local`） | 本地开发凭证 | `start-all.sh` 优先 `source` 注入 bash 进程 |
+| `.env.example` | ❌ 跟踪 | 生产凭证**模板**（占位符） | 复制为 `.env` 应急用 |
+| `.env.local.example` | ❌ 跟踪 | 本地凭证**模板**（含获取步骤） | 复制为 `.env.local` 本地使用 |
+
+**加载优先级**（高 → 低）：
+
+```
+os.environ  >  .env.local  >  根 .env
+```
+
+**具体加载流程**：
+
+1. `scripts/start-all.sh` line 45-50：检测到 `.env.local` 存在则 `set -a; source .env.local`，把本地凭证注入 bash 进程（这一步保证 `manager.py:114` 的 `os.environ.get("LANGFUSE_*")` 拿到本地凭证）
+2. `backend/app/config.py:19-22`：手动 `load_dotenv(根 .env)` 然后 `load_dotenv(.env.local, override=True)`，让 pydantic-settings 读 `os.environ` 时拿到本地值
+3. `backend/app/config.py:25-39`：`SettingsConfigDict(env_file=[.env, .env.local])` —— pydantic-settings v2 文档明确：**多个 env_file 时后者覆盖前者**
+
+**生产不受影响**：服务器上不创建 `.env.local`，只保留根 `.env`；`docker-compose.prod.yml` 直接读根 `.env` 注入容器，跟分层逻辑无关。
+
+**本地没建 `.env.local` 怎么办**：`start-all.sh` 会 fallback 到根 `.env` 并打 warning ⚠️，提示会污染生产数据。建议始终建 `.env.local`。
+
+**新建本地凭证的步骤**（详见 `.env.local.example`）：
+
+1. Neon 控制台 → 找 miao-ai 项目 → Branches → Create Branch (dev) → 复制 connection string
+2. Langfuse 控制台 → 新建 project (miao-ai-dev) → Settings → API Keys → Create new key → 复制 pk/sk
+3. `cp .env.local.example .env.local` → 填入上面的凭证
 
 ### 外部服务
 

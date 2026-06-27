@@ -171,3 +171,51 @@ async def stop_agent(
 
     # 4. 重新读 managed（stop() 后 status="stopped"），返回组装结果
     return await _with_status(agent, registry, session)
+
+
+@router.post("/{name}/activate", response_model=AgentRead)
+async def activate_agent(
+    name: str, session: AsyncSession = Depends(get_session)
+) -> AgentRead:
+    """从 stopped 状态唤醒 agent 容器/进程，DB 定义不动。
+
+    复用 invoke.py 的 `_try_auto_activate` 路径：
+    - 场景1：registry 里有该 agent 的 ManagedAgent（常见，stop 后留在 registry）
+      → 轻量重启，docker 模式只起容器、venv 模式复用 .venv 缓存
+    - 场景2：registry 里没有（很少见，比如 backend 重启后）
+      → 新建 ManagedAgent + build_and_start
+
+    幂等：agent 已 running 时再调也 OK（_try_auto_activate 会先查 running_count）。
+    """
+    # 1. 找 DB 定义；不存在 → 404
+    result = await session.execute(select(Agent).where(Agent.name == name))
+    agent = result.scalar_one_or_none()
+    if agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Agent '{name}' not found"
+        )
+
+    # 2. 调 _try_auto_activate 拉起 active version
+    from .invoke import _try_auto_activate
+
+    managed = await _try_auto_activate(name, session)
+    if managed is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to activate agent '{name}' (check server logs: build/start error)",
+        )
+
+    # 3. 同步 active version.status 到 managed.status
+    av_result = await session.execute(
+        select(AgentVersion)
+        .where(AgentVersion.agent_id == agent.id)
+        .where(AgentVersion.is_active.is_(True))
+    )
+    av = av_result.scalar_one_or_none()
+    if av is not None and av.status != managed.status:
+        av.status = managed.status
+        session.add(av)
+        await session.commit()
+        await session.refresh(av)
+
+    return await _with_status(agent, AgentRegistry.instance(), session)

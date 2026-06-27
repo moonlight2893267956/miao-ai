@@ -227,6 +227,7 @@ Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 
 | GET | `/agents` | 列出所有 agent（含实时 status） |
 | GET | `/agents/{name}` | 获取单个 agent |
 | POST | `/agents/{name}/stop` | 停 agent 容器/进程，DB 定义保留，幂等；下次 invoke 自动唤醒 |
+| POST | `/agents/{name}/activate` | 从 stopped 状态唤醒 agent；复用 `_try_auto_activate` 轻量路径（不重下 zip / 不重 build），幂等 |
 | DELETE | `/agents/{name}` | 删除 agent（停止进程 + CASCADE） |
 
 ### 5.3 版本管理
@@ -412,6 +413,7 @@ Docker 模式支持：
 - 两种来源：用户调 `POST /agents/{name}/stop`（手动）、watchdog 检测到 idle > 300s（自动）
 - DB 侧同步：`agent_versions.status` 也会被 API handler 改成 `"stopped"`（持久化标记，watchdog 路径不写）
 - 下次 invoke：走 `_try_auto_activate`（`api/invoke.py:88`）自动唤醒，docker 模式复用 `_image_tag` 跳过 build，venv 模式复用 `needs_build` 缓存
+- 显式唤醒：用户调 `POST /agents/{name}/activate`（不依赖 invoke/无 API key 要求），handler 内部直接调 `_try_auto_activate` 路径，UI 在 stopped 状态显示 Play 按钮
 
 ### 6.4 模型管理运行时数据流（新增）
 

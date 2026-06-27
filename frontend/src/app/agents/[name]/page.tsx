@@ -16,6 +16,7 @@ import {
   type ApiKey,
   type ApiKeyWithSecret,
   type LlmModel,
+  activateAgent as apiActivateAgent,
   activateVersion,
   createKey,
   deleteAgent as apiDeleteAgent,
@@ -145,6 +146,19 @@ export default function AgentDetailPage() {
     setActionError(null);
     try {
       const updated = await apiStopAgent(name);
+      setAgent(updated);
+    } catch (e) {
+      setActionError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onActivateAgent() {
+    setBusy(true);
+    setActionError(null);
+    try {
+      const updated = await apiActivateAgent(name);
       setAgent(updated);
     } catch (e) {
       setActionError((e as Error).message);
@@ -346,7 +360,12 @@ export default function AgentDetailPage() {
               ID: {agent.id}
             </p>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div
+            className="flex items-center gap-1 self-start rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-secondary)]/50 p-1 sm:self-auto"
+            role="toolbar"
+            aria-label="Agent runtime controls"
+          >
+            {/* Segment 1: Model selector (config) */}
             <ModelSelector
               models={models}
               value={agent.model_id ?? null}
@@ -354,34 +373,70 @@ export default function AgentDetailPage() {
               disabled={busy}
               onChange={onModelChange}
             />
-            <StatusBadge status={agent.status} />
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={refresh}
-              disabled={busy}
-              className="group active:scale-90 transition-transform duration-150"
-            >
-              <RefreshCw
-                className={`h-4 w-4 transition-transform duration-500 ease-out ${
-                  busy ? "animate-spin" : "group-hover:rotate-180"
-                }`}
-              />
-            </Button>
-            {agent.status !== "stopped" && (
+
+            {/* Divider */}
+            <div
+              className="mx-1 h-6 w-px self-stretch bg-[var(--color-border)]"
+              aria-hidden="true"
+            />
+
+            {/* Segment 2: Status + runtime toggle (Activate / Stop) */}
+            <div className="flex items-center gap-1.5 px-1">
+              <StatusBadge status={agent.status} />
+              {agent.status === "stopped" ? (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={onActivateAgent}
+                  disabled={busy}
+                  title="Activate (warm up the agent container/process)"
+                >
+                  <Play className="h-4 w-4 text-[var(--color-success-icon)]" />
+                </Button>
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={onStopAgent}
+                  disabled={busy}
+                  title="Stop (DB definition kept, auto-wake on next invoke)"
+                >
+                  <StopCircle className="h-4 w-4 text-[var(--color-warning-icon)]" />
+                </Button>
+              )}
+            </div>
+
+            {/* Divider */}
+            <div
+              className="mx-1 h-6 w-px self-stretch bg-[var(--color-border)]"
+              aria-hidden="true"
+            />
+
+            {/* Segment 3: Page actions (Refresh + Delete) */}
+            <div className="flex items-center gap-0.5">
               <Button
                 variant="ghost"
                 size="icon"
-                onClick={onStopAgent}
+                onClick={refresh}
                 disabled={busy}
-                title="Stop (DB definition kept, auto-wake on next invoke)"
+                className="group active:scale-90 transition-transform duration-150"
+                title="Refresh"
               >
-                <StopCircle className="h-4 w-4 text-[var(--color-warning-icon)]" />
+                <RefreshCw
+                  className={`h-4 w-4 transition-transform duration-500 ease-out ${
+                    busy ? "animate-spin" : "group-hover:rotate-180"
+                  }`}
+                />
               </Button>
-            )}
-            <Button variant="ghost" size="icon" onClick={onDeleteAgent} title="Delete agent (cascades to versions & keys)">
-              <Trash2 className="h-4 w-4 text-[var(--color-error-icon)]" />
-            </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onDeleteAgent}
+                title="Delete agent (cascades to versions & keys)"
+              >
+                <Trash2 className="h-4 w-4 text-[var(--color-error-icon)]" />
+              </Button>
+            </div>
           </div>
         </div>
 

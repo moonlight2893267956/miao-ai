@@ -3,6 +3,11 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+      args:
+        HTTP_PROXY: ${BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${BUILD_HTTPS_PROXY:-${BUILD_HTTP_PROXY:-}}
+        http_proxy: ${BUILD_HTTP_PROXY:-}
+        https_proxy: ${BUILD_HTTPS_PROXY:-${BUILD_HTTP_PROXY:-}}
     container_name: miao-backend
     env_file:
       - .env
@@ -14,6 +19,7 @@ services:
       - "127.0.0.1:18000:8000"
     volumes:
       - miao-agent-work:/tmp/miao/agents
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)"]
@@ -27,6 +33,10 @@ services:
       context: .
       dockerfile: frontend/Dockerfile
       args:
+        HTTP_PROXY: ${BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${BUILD_HTTPS_PROXY:-${BUILD_HTTP_PROXY:-}}
+        http_proxy: ${BUILD_HTTP_PROXY:-}
+        https_proxy: ${BUILD_HTTPS_PROXY:-${BUILD_HTTP_PROXY:-}}
         NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-https://agent.yunmiao.site}
         NEXT_PUBLIC_LANGFUSE_BASE_URL: ${NEXT_PUBLIC_LANGFUSE_BASE_URL:-https://cloud.langfuse.com}
         NEXT_PUBLIC_LANGFUSE_PROJECT_ID: ${NEXT_PUBLIC_LANGFUSE_PROJECT_ID:-}

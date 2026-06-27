@@ -1,4 +1,14 @@
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG http_proxy
+ARG https_proxy
+
 FROM node:20-slim AS deps
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG http_proxy
+ARG https_proxy
 
 WORKDIR /app/frontend
 
@@ -8,6 +18,11 @@ COPY frontend/package.json frontend/pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 
 FROM node:20-slim AS builder
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG http_proxy
+ARG https_proxy
 
 WORKDIR /app/frontend
 

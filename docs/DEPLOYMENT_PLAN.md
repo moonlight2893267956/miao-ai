@@ -1,7 +1,7 @@
 # Miao AI 部署计划
 
 > 目标：将 Miao AI 部署到 `yunmiao@81.70.216.46`，通过 `https://agent.yunmiao.site` 对外访问。
-> 当前状态：本地已准备登录功能与生产 Docker/Compose 部署配置，并完成本地验证；尚未提交推送，尚未执行服务器部署。
+> 当前状态：本地已准备登录功能与生产 Docker/Compose 部署配置，并完成本地验证；服务器已开始部署但仍需同步最新代码、修复 nginx 反代并完成最终验证。
 > 本文记录计划和已完成的本地准备工作，不包含真实密钥。
 
 ## 1. 已确认环境
@@ -106,9 +106,11 @@ NEXT_PUBLIC_API_BASE=https://agent.yunmiao.site
   - 定义 `backend` / `frontend` 两个服务
   - 后端使用根目录 `.env`
   - 前端只接收 `NEXT_PUBLIC_*` 构建参数，避免注入后端密钥
+  - 镜像构建代理使用 `BUILD_HTTP_PROXY` / `BUILD_HTTPS_PROXY`，避免把运行时 `HTTP_PROXY` 注入后端
   - 后端映射 `127.0.0.1:18000:8000`
   - 前端映射 `127.0.0.1:13000:3000`
-  - 后端强制 `agent_runtime_mode=venv` / `AGENT_RUNTIME_MODE=venv`
+  - 后端默认 `agent_runtime_mode=docker` / `AGENT_RUNTIME_MODE=docker`
+  - 后端挂载 `/var/run/docker.sock`，用于 docker 模式管理 agent 容器
   - 后端挂载 `miao-agent-work:/tmp/miao/agents`
   - 配置 `restart: unless-stopped`
   - 后端包含 `/api/v1/health` 健康检查

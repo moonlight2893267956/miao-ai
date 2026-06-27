@@ -1,7 +1,7 @@
 # Miao AI 部署计划
 
 > 目标：将 Miao AI 部署到 `yunmiao@81.70.216.46`，通过 `https://agent.yunmiao.site` 对外访问。
-> 当前状态：本地已准备登录功能与生产 Docker/Compose 部署配置，并完成本地验证；服务器已开始部署但仍需同步最新代码、修复 nginx 反代并完成最终验证。
+> 当前状态：已部署完成。服务器运行 `main@a016bd5`，Docker Compose 容器正常，nginx/HTTPS 已反代到前后端。
 > 本文记录计划和已完成的本地准备工作，不包含真实密钥。
 
 ## 1. 已确认环境
@@ -11,7 +11,7 @@
 - 仓库：`git@github.com:moonlight2893267956/miao-ai.git`
 - 分支：`main`
 - 当前部署策略：先提交并推送本地改动，再由服务器从 GitHub 拉取。
-- 当前工作区已准备生产 Docker / Compose 配置文件，但尚未提交推送：
+- 当前工作区已提交并推送生产 Docker / Compose 配置文件：
   - `.dockerignore`
   - `backend/Dockerfile`
   - `frontend/Dockerfile`
@@ -47,6 +47,7 @@
 - 目标域名：`agent.yunmiao.site`
 - DNS：已解析到 `81.70.216.46`
 - HTTPS：沿用宝塔 / 现有 nginx 证书管理流程
+- 当前公网访问：`https://agent.yunmiao.site` 已返回 Miao AI Next.js 页面，不再返回宝塔默认静态页。
 
 ## 2. 部署架构
 
@@ -165,7 +166,44 @@ docker compose -f docker-compose.prod.yml config
 
 结果：配置可解析。注意该命令会读取本地 `.env`，不要把输出中的真实密钥写入文档或提交记录。
 
-本地 Docker 镜像构建曾启动验证，但受 Docker Hub 基础镜像下载速度影响中断；未观察到代码层面的构建错误。实际镜像构建留到服务器部署时执行。
+本地 Docker 镜像构建曾启动验证，但受 Docker Hub 基础镜像下载速度影响中断；未观察到代码层面的构建错误。实际镜像构建已在服务器完成。
+
+### 3.4 服务器部署结果
+
+部署时间：2026-06-27
+
+已完成：
+
+- 服务器部署目录：`/home/yunmiao/apps/miao-ai`
+- 当前部署提交：`a016bd5 fix(deploy): use reliable pip mirror for backend image`
+- 原服务器现场脏改动已备份到：`/home/yunmiao/apps/miao-ai-deploy-backups/`
+- `.env` 已保留在服务器本地，未提交到 Git
+- `NEXT_PUBLIC_API_BASE=https://agent.yunmiao.site`
+- `AGENT_RUNTIME_MODE=docker`
+- 镜像构建使用阿里云 Debian / PyPI 镜像源，避免服务器网络拉取默认源超时或代理 502
+- `docker compose -f docker-compose.prod.yml up -d --build` 已完成
+- `docker compose -f docker-compose.prod.yml exec -T backend alembic upgrade head` 已执行
+- 数据库已有登录用户：`users_total=1`，`users_active=1`
+- 后端容器状态：`miao-backend` healthy
+- 前端容器状态：`miao-frontend` running
+- agent 容器恢复：`miao-qwen-chat` running
+
+本次排查到的问题：
+
+- nginx vhost 仍返回宝塔默认静态站点，没有反代到 `127.0.0.1:13000` / `127.0.0.1:18000`
+- 服务器现场曾手工修改 `docker-compose.prod.yml`，导致后端 Docker healthcheck 的 URL 引号丢失，容器显示 unhealthy
+- backend 镜像构建依赖默认 Debian / PyPI 源和本地代理时不稳定，出现下载慢、代理 `502 Bad Gateway`
+
+已修复：
+
+- 将服务器部署目录重置到远端 `origin/main` 的正式提交
+- 后端生产镜像从 `docker:27-cli` 拷贝 Docker CLI，并挂载 `/var/run/docker.sock`
+- 后端构建默认使用阿里云 Debian / PyPI 镜像源
+- nginx 新增宝塔 extension 反代配置：
+  - `/api/` -> `http://127.0.0.1:18000`
+  - `/_next/` -> `http://127.0.0.1:13000`
+  - `/` -> `http://127.0.0.1:13000`
+- `sudo nginx -t` 通过并已 reload
 
 ## 4. 发布流程
 
@@ -243,6 +281,8 @@ docker compose -f docker-compose.prod.yml exec backend alembic upgrade head
 
 登录用户由数据库配置，不提供注册功能。
 
+当前数据库已有 1 个 active 登录用户，因此本次部署没有新建或覆盖登录用户。
+
 ```sql
 INSERT INTO users (username, password, is_active)
 VALUES ('admin', 'your-password', true);
@@ -308,6 +348,12 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
+当前已落地的宝塔 nginx extension 文件：
+
+```bash
+/www/server/panel/vhost/nginx/extension/agent.yunmiao.site/00-miao-reverse-proxy.conf
+```
+
 ## 6. 验证清单
 
 ### 容器状态
@@ -331,6 +377,11 @@ curl -i https://agent.yunmiao.site/api/v1/health/ready
 - `/health` 返回 `200`
 - `/health/ready` 返回 `200`，并包含 DB ready 信息
 
+当前验证结果：
+
+- `https://agent.yunmiao.site/api/v1/health` 返回 `200 {"status":"ok"}`
+- `https://agent.yunmiao.site/api/v1/health/ready` 返回 `200 {"status":"ready","db":"ok"}`
+
 ### 登录态
 
 未登录：
@@ -340,6 +391,8 @@ curl -i https://agent.yunmiao.site/api/v1/auth/me
 ```
 
 预期：`401`
+
+当前验证结果：`https://agent.yunmiao.site/api/v1/auth/me` 未登录返回 `401 {"detail":"not authenticated"}`。
 
 登录：
 
@@ -355,6 +408,12 @@ curl -i -b /tmp/miao-cookie.txt \
 
 预期：登录成功后 `/auth/me` 返回当前用户。
 
+当前验证结果：
+
+- 使用数据库中已有 active 用户完成登录，`/api/v1/auth/login` 返回 `200`
+- 带 cookie 请求 `/api/v1/auth/me` 返回 `200`
+- 带 cookie 请求受保护接口 `/api/v1/agents` 返回 `200`，当前返回 1 个 agent
+
 ### 前端
 
 - 浏览器打开 `https://agent.yunmiao.site`
@@ -362,6 +421,11 @@ curl -i -b /tmp/miao-cookie.txt \
 - 登录后进入控制台
 - 模型管理页能正常读取 provider / model
 - Agent 列表能正常读取
+
+当前验证结果：
+
+- `https://agent.yunmiao.site/` 返回 Next.js / Miao AI 页面
+- 已确认不再返回宝塔默认“站点创建成功”页面
 
 ## 7. 回滚方案
 
@@ -413,10 +477,4 @@ sudo systemctl reload nginx
 
 ### 待实施项
 
-- 提交并推送当前代码
-- 服务器创建生产 `.env`
-- 服务器拉取代码并构建容器
-- 执行 Alembic 迁移
-- 初始化登录用户
-- 配置宝塔 / nginx vhost 和 HTTPS
-- 完成部署后验证清单
+- 视需要在宝塔面板标注该站点使用 extension 反代配置，避免后续误删

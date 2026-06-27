@@ -2,6 +2,8 @@ ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG http_proxy
 ARG https_proxy
+ARG APT_MIRROR=http://mirrors.aliyun.com/debian
+ARG APT_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
 
 FROM docker:27-cli AS docker-cli
 
@@ -11,6 +13,8 @@ ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG http_proxy
 ARG https_proxy
+ARG APT_MIRROR=http://mirrors.aliyun.com/debian
+ARG APT_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -22,6 +26,9 @@ COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 
 RUN set -eux; \
     docker --version; \
+    printf 'deb %s bookworm main\n' "$APT_MIRROR" > /etc/apt/sources.list; \
+    printf 'deb %s bookworm-updates main\n' "$APT_MIRROR" >> /etc/apt/sources.list; \
+    printf 'deb %s bookworm-security main\n' "$APT_SECURITY_MIRROR" >> /etc/apt/sources.list; \
     apt_proxy="${HTTP_PROXY:-${http_proxy:-}}"; \
     apt_https_proxy="${HTTPS_PROXY:-${https_proxy:-$apt_proxy}}"; \
     if [ -n "$apt_proxy" ]; then \

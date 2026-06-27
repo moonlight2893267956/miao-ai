@@ -8,6 +8,8 @@ services:
         HTTPS_PROXY: ${BUILD_HTTPS_PROXY:-${BUILD_HTTP_PROXY:-}}
         http_proxy: ${BUILD_HTTP_PROXY:-}
         https_proxy: ${BUILD_HTTPS_PROXY:-${BUILD_HTTP_PROXY:-}}
+        APT_MIRROR: ${BUILD_APT_MIRROR:-http://mirrors.aliyun.com/debian}
+        APT_SECURITY_MIRROR: ${BUILD_APT_SECURITY_MIRROR:-http://mirrors.aliyun.com/debian-security}
     container_name: miao-backend
     env_file:
       - .env

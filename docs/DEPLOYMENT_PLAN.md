@@ -92,6 +92,7 @@ NEXT_PUBLIC_API_BASE=https://agent.yunmiao.site
   - 保留示例环境文件
 - `backend/Dockerfile`
   - 基于 `python:3.12-slim`
+  - 从 `docker:27-cli` 拷贝 Docker CLI，供 docker runtime 管理 agent 容器
   - 安装 `build-essential`、`curl`、`uv`
   - 安装 backend 包依赖
   - 复制 `app`、`agent_templates`、`alembic` 和 `alembic.ini`

@@ -1,3 +1,10 @@
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG http_proxy
+ARG https_proxy
+
+FROM docker:27-cli AS docker-cli
+
 FROM python:3.12-slim-bookworm
 
 ARG HTTP_PROXY
@@ -11,7 +18,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app/backend
 
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+
 RUN set -eux; \
+    docker --version; \
     apt_proxy="${HTTP_PROXY:-${http_proxy:-}}"; \
     apt_https_proxy="${HTTPS_PROXY:-${https_proxy:-$apt_proxy}}"; \
     if [ -n "$apt_proxy" ]; then \
@@ -21,13 +31,7 @@ RUN set -eux; \
         printf 'Acquire::https::Proxy "%s";\n' "$apt_https_proxy" >> /etc/apt/apt.conf.d/90proxy; \
     fi; \
     apt-get update; \
-    apt-get install -y --no-install-recommends build-essential ca-certificates curl gnupg; \
-    install -m 0755 -d /etc/apt/keyrings; \
-    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc; \
-    chmod a+r /etc/apt/keyrings/docker.asc; \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends docker-ce-cli; \
+    apt-get install -y --no-install-recommends build-essential ca-certificates curl; \
     rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/90proxy
 
 COPY backend/pyproject.toml backend/uv.lock ./

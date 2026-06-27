@@ -93,7 +93,7 @@ NEXT_PUBLIC_API_BASE=https://agent.yunmiao.site
 - `backend/Dockerfile`
   - 基于 `python:3.12-slim`
   - 从 `docker:27-cli` 拷贝 Docker CLI，供 docker runtime 管理 agent 容器
-  - 默认使用 `mirrors.aliyun.com` Debian 源，可通过 `BUILD_APT_MIRROR` / `BUILD_APT_SECURITY_MIRROR` 调整
+  - 默认禁用基础镜像自带 Debian source，改用 `mirrors.aliyun.com` Debian 源；可通过 `BUILD_APT_MIRROR` / `BUILD_APT_SECURITY_MIRROR` 调整
   - 安装 `build-essential`、`curl`、`uv`
   - 安装 backend 包依赖
   - 复制 `app`、`agent_templates`、`alembic` 和 `alembic.ini`

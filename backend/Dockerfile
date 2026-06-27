@@ -26,6 +26,7 @@ COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 
 RUN set -eux; \
     docker --version; \
+    rm -f /etc/apt/sources.list.d/debian.sources; \
     printf 'deb %s bookworm main\n' "$APT_MIRROR" > /etc/apt/sources.list; \
     printf 'deb %s bookworm-updates main\n' "$APT_MIRROR" >> /etc/apt/sources.list; \
     printf 'deb %s bookworm-security main\n' "$APT_SECURITY_MIRROR" >> /etc/apt/sources.list; \

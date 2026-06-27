@@ -361,7 +361,7 @@ export default function AgentDetailPage() {
             </p>
           </div>
           <div
-            className="flex items-center gap-1 self-start rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-secondary)]/50 p-1 sm:self-auto"
+            className="flex items-center gap-1 self-start rounded-lg bg-[var(--color-surface-secondary)]/50 p-1 sm:self-auto"
             role="toolbar"
             aria-label="Agent runtime controls"
           >

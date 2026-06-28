@@ -1,7 +1,7 @@
 # Miao AI — 项目规划与 Roadmap
 
 > 自托管个人级 AI Agent 平台。Trace 可观测 + Agent 上传/部署 + API 调用。
-> 详细需求分析见 `.claude/plans/langsmith-aiagent-langchain-langgraph-a-melodic-creek.md`（plan mode 产出），本文档反映实际推进的 roadmap。
+> 详细需求分析见 `docs/history/2026-06-llm-model-mgmt-task.md`（早期 plan mode 产出），本文档反映实际推进的 roadmap。
 
 ## 愿景
 
@@ -41,7 +41,7 @@
 | **Phase 1e** | 集成测试 + 文档 | ✅ | 12/12 pytest；e2e_smoke.sh |
 | **Phase 1 前端** | Next.js 管理 UI（3 个页面） | ✅ | 4 页面 200；CORS 修好；asChild warning 修好 |
 | **Phase 2** | 多 agent + 健壮性 | ✅ | AgentRegistry 加锁 + 崩溃重启 + lifespan 恢复 + 空闲回收 + 端口重试 + watchdog |
-| **Phase 3** | 增强特性 | ⏳ | SSE 流式 ✅ · Webhook ✅ · Docker ✅ → 剩余按需 |
+"
 
 **当前测试覆盖**：12 个 pytest（health 2 + agents 5 + invoke 5），全过，约 90 秒（含 Neon 网络延迟）。
 
@@ -149,13 +149,23 @@
 | 文档 | 位置 | 用途 |
 |---|---|---|
 | 本文档（roadmap） | `docs/ROADMAP.md` | 项目规划、当前状态、Phase 计划 |
-| 快速开始 | `docs/QUICKSTART.md` | 5~10 分钟从零跑通 |
-| 项目总览 | `README.md` | 一句话简介 + 当前状态 |
-| 云服务注册 | `infra/CLOUD_SETUP.md` | 4 个云服务的注册步骤 |
-| 后端使用 | `backend/README.md` | API 速查 + 完整使用流程 |
-| 前端使用 | `frontend/README.md` | 页面功能 + 开发指南 |
+| 项目门面 | `README.md` | 一句话简介 + 文档导航 |
+| 贡献指南 | `CONTRIBUTING.md` | commit 规范 / PR 流程 / 文档同步规则 |
+| 变更日志 | `CHANGELOG.md` | 全部版本变更 |
+| 架构设计 | `docs/ARCHITECTURE.md` | 完整架构（API/DB/runtime/widget） |
+| API 速查 | `docs/api-reference.md` | 端点列表 + 示例 |
+| 本地开发 | `docs/operations/local-dev.md` | 5~10 分钟从零跑通（必读） |
+| 部署 SOP | `docs/operations/deployment.md` | 服务器部署 + 升级 + 回滚 |
+| 排错手册 | `docs/operations/troubleshooting.md` | 9 类常见问题 + 修法 |
+| 安全规范 | `docs/operations/security.md` | 凭证 / 加密 / 授权 |
+| 监控日志 | `docs/operations/monitoring.md` | 日志位置 / 健康探针 / Langfuse |
+| 设计系统 | `docs/design/ui-design-system.md` | 前端设计令牌 + 组件 |
+| 云服务注册 | `infra/CLOUD_SETUP.md` | 4 个云服务供应商侧步骤 |
+| 后端使用 | `backend/README.md` | 后端 API 详细 |
+| 前端使用 | `frontend/README.md` | 前端页面 + 开发指南 |
 | 端到端冒烟 | `backend/scripts/e2e_smoke.sh` | curl 跑完整流程 |
 | 启动脚本 | `scripts/start-all.sh` / `stop-all.sh` / `status.sh` | 一键启停 |
+| 历史归档 | `docs/history/` | 已闭环的 code review / 任务 / 部署过程 |
 
 ---
 

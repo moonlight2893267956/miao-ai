@@ -40,16 +40,16 @@ if [ -d "$HOME/.nvm/versions/node" ]; then
 fi
 
 # ===== 凭证加载（本地凭证隔离生产）=====
-# 优先 .env.local（gitignore，本地开发用）→ 隔离生产 Langfuse/Neon
+# 优先 .env.local（gitignore，本地开发用）→ 隔离生产 Langfuse/MySQL
 # 回退根 .env（生产凭证）→ 会污染生产数据，仅应急用
 if [ -f .env.local ]; then
-  echo "▶ 加载本地凭证 .env.local（隔离生产 Langfuse/Neon）"
+  echo "▶ 加载本地凭证 .env.local（隔离生产 Langfuse/MySQL）"
   set -a
   # shellcheck disable=SC1091
   source .env.local
   set +a
 elif [ -f .env ]; then
-  echo "⚠️  未找到 .env.local，回退到根 .env（会写到生产 Langfuse/Neon）"
+  echo "⚠️  未找到 .env.local，回退到根 .env（会写到生产 Langfuse/MySQL）"
   echo "   建议：cp .env.local.example .env.local 并填本地凭证"
   set -a
   # shellcheck disable=SC1091

@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     debug: bool = False
     log_level: str = "INFO"
 
-    # ===== Database（Neon PG） =====
+    # ===== Database（MySQL） =====
     database_url: str
 
     # ===== Langfuse（trace） =====

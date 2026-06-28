@@ -1,6 +1,6 @@
 # Miao AI
 
-> 自托管、轻量级 AI Agent 平台：用户上传 Python agent 代码包 → 平台负责 build / 版本管理 / 容器化运行 → 暴露为统一 HTTP API（含流式响应）。FastAPI + Next.js + Docker，Langfuse 全链路 trace，Fernet 加密 provider 凭证，Neon Postgres 持久化。
+> 自托管、轻量级 AI Agent 平台：用户上传 Python agent 代码包 → 平台负责 build / 版本管理 / 容器化运行 → 暴露为统一 HTTP API（含流式响应）。FastAPI + Next.js + Docker，Langfuse 全链路 trace，Fernet 加密 provider 凭证，MySQL 持久化。
 
 ## 是什么
 
@@ -20,7 +20,7 @@
                                         │
                                         ├─ invoke 来时启动 agent 容器
                                         │   └─ miao-{name}:8080 (per-agent)
-                                        ├─ Neon Postgres
+                                        ├─ MySQL
                                         ├─ 腾讯云 COS（agent 代码包）
                                         ├─ Langfuse（trace）
                                         └─ DashScope / OpenAI（LLM）

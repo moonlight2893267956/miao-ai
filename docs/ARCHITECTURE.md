@@ -15,7 +15,7 @@ Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 
 - 异步任务提交 + Webhook 回调
 - 进程崩溃自动重启、空闲超时回收（invoke 时自动唤醒）、per-agent 令牌桶限流
 - 启动时自动恢复已激活的 agent
-- 代码包存储于腾讯云 COS，业务数据存 Neon PostgreSQL
+- 代码包存储于腾讯云 COS，业务数据存 MySQL
 - 提供商 API Key 使用 Fernet 对称加密存储，运行时解密注入子进程
 
 ---
@@ -62,9 +62,10 @@ Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 
            │          │             │             │
            ▼          ▼             ▼             ▼
     ┌──────────┐ ┌───────┐  ┌───────────┐  ┌──────────────┐
-    │  Neon PG │ │  COS  │  │ Langfuse  │  │ 任意 OpenAI  │
-    │ (业务DB) │ │(zip包)│  │  (trace)  │  │ 兼容 LLM     │
-    └──────────┘ └───────┘  └───────────┘  └──────────────┘
+    │miao-infra│ │  COS  │  │ Langfuse  │  │ 任意 OpenAI  │
+    │ MySQL+   │ │(zip包)│  │  (trace)  │  │ 兼容 LLM     │
+    │ Redis    │ └───────┘  └───────────┘  └──────────────┘
+    └──────────┘
 ```
 
 ---
@@ -75,7 +76,8 @@ Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 
 |------|------|------|
 | **后端框架** | FastAPI + Uvicorn | 异步 Python Web 框架 |
 | **ORM** | SQLAlchemy 2.0 (async) | 异步数据库操作 |
-| **数据库** | Neon PostgreSQL (Serverless) | 业务数据存储 |
+| **数据库** | MySQL 8.4 (与 miao-toolbox 共用实例) | 业务数据存储 |
+| **DB 驱动** | aiomysql | MySQL 异步驱动 |
 | **数据迁移** | Alembic | 版本化管理 DB schema |
 | **对象存储** | 腾讯云 COS (S3 兼容) | agent zip 包存储 |
 | **可观测性** | Langfuse + structlog | 完整调用链路追踪 |
@@ -598,7 +600,7 @@ frontend/src/
 
 ### 环境分层（本地 vs 生产隔离）
 
-为避免本地开发污染生产 Langfuse trace 和 Neon DB，项目采用**双 env_file 分层**方案：
+为避免本地开发污染生产 Langfuse trace 和 MySQL DB，项目采用**双 env_file 分层**方案：
 
 | 文件 | gitignore | 用途 | 加载方 |
 |---|---|---|---|
@@ -625,7 +627,7 @@ os.environ  >  .env.local  >  根 .env
 
 **新建本地凭证的步骤**（详见 `.env.local.example`）：
 
-1. Neon 控制台 → 找 miao-ai 项目 → Branches → Create Branch (dev) → 复制 connection string
+1. 本地 MySQL 创建 miao_ai 库并授权：`CREATE DATABASE miao_ai ...; GRANT ALL ON miao_ai.* TO 'miao'@'%';`
 2. Langfuse 控制台 → 新建 project (miao-ai-dev) → Settings → API Keys → Create new key → 复制 pk/sk
 3. `cp .env.local.example .env.local` → 填入上面的凭证
 
@@ -637,8 +639,8 @@ LANGFUSE_PUBLIC_KEY=pk-lf-...
 LANGFUSE_SECRET_KEY=sk-lf-...
 LANGFUSE_BASE_URL=https://cloud.langfuse.com
 
-# Neon PostgreSQL
-DATABASE_URL=postgresql+asyncpg://user:pass@host/db?ssl=require
+# MySQL
+DATABASE_URL=mysql+aiomysql://user:pass@host:3306/miao_ai?charset=utf8mb4
 
 # 腾讯云 COS
 TENCENT_SECRET_ID=...
@@ -682,6 +684,17 @@ ENCRYPTION_KEY=...
 ---
 
 ## 10. 部署与运维
+
+### 生产环境
+
+**docker compose 部署**（`docker-compose.prod.yml`），包含 2 个服务：`backend` + `frontend`。
+
+**基础设施由 miao-infra 提供**：生产环境**不创建自己的 MySQL/Redis 容器**，而是加入独立的 `miao-infra-net` 外部网络，复用 `miao-infra/docker-compose.yml` 中的 `miao-mysql` + `miao-redis`。库名 `miao_ai`（和 miao-toolbox 的 `miao_toolbox` 库共存于同一实例）。
+
+> DATABASE_URL：`mysql+aiomysql://miao:PASSWORD@miao-mysql:3306/miao_ai?charset=utf8mb4`
+> （host 写 `miao-mysql` —— 是 miao-infra 编排里的容器名，Docker 网络内 DNS 解析）
+
+### 本地开发
 
 ### 启动流程
 

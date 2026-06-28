@@ -4,8 +4,7 @@ invoke_tasks — 异步调用任务状态持久化。
 import uuid as _uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
-from sqlalchemy.dialects.postgresql import JSON, UUID
+from sqlalchemy import Boolean, DateTime, ForeignKey, JSON, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
@@ -18,9 +17,9 @@ def _new_uuid() -> _uuid.UUID:
 class InvokeTask(Base):
     __tablename__ = "invoke_tasks"
 
-    id: Mapped[_uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    id: Mapped[_uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_new_uuid)
     agent_id: Mapped[_uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False
+        Uuid, ForeignKey("agents.id", ondelete="CASCADE"), nullable=False
     )
     agent_name: Mapped[str] = mapped_column(String(64), nullable=False)
     request_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)

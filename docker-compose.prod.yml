@@ -1,3 +1,15 @@
+# ============================================================
+# miao-ai 生产部署编排
+# ============================================================
+# MySQL + Redis 由 miao-infra 提供（独立 compose，详见 ../miao-infra/）。
+# miao-ai 通过外部网络 miao-infra-net 连接，不创建自己的数据库 / 缓存容器。
+#
+# 部署前确认：
+#   1. miao-infra 已启动：cd ../miao-infra && docker compose ps
+#   2. miao_ai 库已创建（见 miao-infra/docker-compose.yml 顶部注释）
+#   3. .env 中 DATABASE_URL host 写 miao-mysql（Docker 网络内服务名）
+# ============================================================
+
 services:
   backend:
     build:
@@ -16,7 +28,6 @@ services:
     env_file:
       - .env
     environment:
-      # 从 .env 读取 agent_runtime_mode；如未设置则使用 docker 模式
       agent_runtime_mode: ${AGENT_RUNTIME_MODE:-docker}
       AGENT_RUNTIME_MODE: ${AGENT_RUNTIME_MODE:-docker}
     ports:
@@ -24,6 +35,8 @@ services:
     volumes:
       - miao-agent-work:/tmp/miao/agents
       - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - miao-infra-net
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)"]
@@ -58,3 +71,8 @@ services:
 
 volumes:
   miao-agent-work:
+
+networks:
+  miao-infra-net:
+    external: true
+    name: miao-infra-net

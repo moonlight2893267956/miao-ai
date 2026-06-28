@@ -36,7 +36,7 @@
 
 | 服务 | 用途 |
 |---|---|
-| **Neon** | Postgres 数据库 |
+| **MySQL** | 业务数据库 |
 | **Langfuse Cloud** | trace 追踪 |
 | **腾讯云 COS** | agent 代码包存储 |
 | **阿里云 DashScope**（或 OpenAI） | LLM provider |
@@ -73,12 +73,33 @@ cd miao-ai
 
 ## 3. 部署步骤
 
+### 3.0 确认基础设施已启动（miao-infra）
+
+miao-ai **不创建自己的 MySQL/Redis 容器**，而是通过 `miao-infra-net` 连接独立的 miao-infra 编排。
+
+```bash
+# 1. 确认 miao-infra 已部署
+cd ~/apps/miao-infra
+docker compose ps
+# 应该看到 miao-mysql + miao-redis 两个容器 running
+
+# 2. 如果还没创建 miao_ai 库（只需执行一次）
+docker exec miao-mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "
+  CREATE DATABASE IF NOT EXISTS miao_ai
+    CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+  GRANT ALL PRIVILEGES ON miao_ai.* TO 'miao'@'%';
+  FLUSH PRIVILEGES;
+"
+```
+
 ### 3.1 写 `.env`
 
 ```bash
 cd ~/apps/miao-ai
 cp .env.example .env
-# 编辑 .env，填入生产凭证（Neon / Langfuse / COS / DashScope / ENCRYPTION_KEY）
+# 编辑 .env，填入生产凭证：
+#   DATABASE_URL=mysql+aiomysql://miao:PASSWORD@mysql:3306/miao_ai?charset=utf8mb4
+#   （注意 host 是 mysql —— Docker 网络内的服务名）
 ```
 
 > `ENCRYPTION_KEY` 必须是 32 字节 URL-safe base64。生成新 key：
@@ -114,7 +135,7 @@ async def main():
         await conn.execute(text(\"\"\"
             INSERT INTO users (username, password, is_active)
             VALUES ('admin', 'your-password', true)
-            ON CONFLICT (username) DO NOTHING
+            ON DUPLICATE KEY UPDATE username=username
         \"\"\"))
 asyncio.run(main())
 "

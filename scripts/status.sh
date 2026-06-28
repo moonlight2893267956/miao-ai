@@ -36,7 +36,7 @@ else
 fi
 
 echo ""
-echo "=== 数据库 (Neon) ==="
+echo "=== 数据库 (MySQL) ==="
 cd "$(dirname "$0")/.." && uv run --directory backend python -c "
 import asyncio
 from app.config import settings

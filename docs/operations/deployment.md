@@ -30,16 +30,16 @@
 - 域名 A 记录解析到服务器公网 IP
 - HTTPS 证书（宝塔 / Let's Encrypt / 自有）
 
-### 1.3 云服务账号
+### 1.3 基础设施与云服务
 
-4 个，详细注册步骤见 [`infra/CLOUD_SETUP.md`](../../infra/CLOUD_SETUP.md)：
+| 层 | 服务 | 用途 | 部署方式 |
+|---|---|---|---|
+| **基础设施** | MySQL 8.4 + Redis 7 | 业务数据库 + 缓存 | 本地 `miao-infra` compose（独立于 miao-ai） |
+| **云服务** | Langfuse Cloud | trace 追踪 | SaaS |
+| **云服务** | 腾讯云 COS | agent 代码包存储 | SaaS |
+| **云服务** | 阿里云 DashScope（或 OpenAI） | LLM provider | SaaS |
 
-| 服务 | 用途 |
-|---|---|
-| **MySQL** | 业务数据库 |
-| **Langfuse Cloud** | trace 追踪 |
-| **腾讯云 COS** | agent 代码包存储 |
-| **阿里云 DashScope**（或 OpenAI） | LLM provider |
+> 云服务注册步骤见 [`infra/CLOUD_SETUP.md`](../../infra/CLOUD_SETUP.md)。miao-infra 只需 `docker compose up -d`，不需要注册账号。
 
 ---
 
@@ -98,8 +98,8 @@ docker exec miao-mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "
 cd ~/apps/miao-ai
 cp .env.example .env
 # 编辑 .env，填入生产凭证：
-#   DATABASE_URL=mysql+aiomysql://miao:PASSWORD@mysql:3306/miao_ai?charset=utf8mb4
-#   （注意 host 是 mysql —— Docker 网络内的服务名）
+#   DATABASE_URL=mysql+aiomysql://miao:PASSWORD@miao-mysql:3306/miao_ai?charset=utf8mb4
+#   （注意 host 是 miao-mysql —— miao-infra 里的容器名，不是 localhost）
 ```
 
 > `ENCRYPTION_KEY` 必须是 32 字节 URL-safe base64。生成新 key：
@@ -284,6 +284,8 @@ sudo nginx -t && sudo systemctl reload nginx
 | `miao-backend` | 8000 | `127.0.0.1:18000` | `python:3.12-slim` + 自构建 |
 | `miao-frontend` | 3000 | `127.0.0.1:13000` | `node:20-slim` + pnpm |
 | `miao-{agent-name}` | 8080 | **不暴露**（用容器名 DNS） | per-agent 镜像 |
+
+> MySQL + Redis 由 `miao-infra` compose 独立管理，不在此表。miao-backend 通过 `miao-infra-net` 连接 `miao-mysql:3306`。
 
 公网只暴露 nginx 443。后端和 frontend 容器只 bind `127.0.0.1`。
 

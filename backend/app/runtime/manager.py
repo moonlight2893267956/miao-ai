@@ -389,23 +389,25 @@ class ManagedAgent:
                 self.last_error = f"process/container died: {e}"
             raise
 
-    def invoke_stream(self, payload: dict, config: dict | None = None, timeout: float = 120.0):
-        """流式调用 agent 子进程，返回 SSE 文本行迭代器。
+    async def invoke_stream(self, payload: dict, config: dict | None = None, timeout: float = 120.0):
+        """异步流式调用 agent 子进程，yield SSE 文本行。
 
-        保留空行（SSE 事件分隔符），调用方需原样转发。
+        用 httpx.AsyncClient 避免线程→asyncio.Queue 桥接（线程内 put_nowait
+        不会唤醒事件循环，导致 token 全部缓冲到结束才一次性返回）。
+        保留空行（SSE 事件分隔符），调用方原样转发。
         """
         if not self._is_running():
             raise RuntimeError(f"agent {self.name} not running (status={self.status})")
         self.last_invoke_at = time.time()
         try:
-            with httpx.Client(timeout=timeout) as client:
-                with client.stream(
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream(
                     "POST",
                     f"{self._invoke_base_url()}/invoke/stream",
                     json={"input": payload, "config": config or {}},
                 ) as r:
                     r.raise_for_status()
-                    for line in r.iter_lines():
+                    async for line in r.aiter_lines():
                         yield line
         except Exception as e:
             if not self.is_alive():

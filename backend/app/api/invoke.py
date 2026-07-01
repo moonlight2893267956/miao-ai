@@ -213,30 +213,17 @@ async def invoke_stream(
     # SSE 流式模式：通知 agent 函数使用 generator 逐 token 输出
     config["stream"] = True
 
-    chunk_queue: asyncio.Queue = asyncio.Queue()
-
-    def _worker():
-        """线程内执行：从子进程拉取流式数据，逐行放入队列。"""
-        try:
-            for line in managed.invoke_stream(body.input, config):
-                chunk_queue.put_nowait(("chunk", line + "\n"))
-        except Exception as e:
-            chunk_queue.put_nowait(("error", str(e)))
-        else:
-            chunk_queue.put_nowait(("done", None))
-
-    loop = asyncio.get_running_loop()
-    worker_future = loop.run_in_executor(None, _worker)
-
     async def event_generator():
-        while True:
-            msg_type, data = await chunk_queue.get()
-            if msg_type == "done":
-                break
-            if msg_type == "error":
-                yield f"event: error\ndata: {json.dumps({'message': data})}\n\n"
-                break
-            yield data
+        try:
+            async for line in managed.invoke_stream(body.input, config):
+                yield line + "\n"
+                # 强制让出事件循环，使 uvicorn transport 的写缓冲数据真正发到 socket。
+                # asyncio.sleep(0) 只让给 ready callbacks 不回 selector；
+                # sleep(0.001) 能回到 selector.select() 使 pending writes flush 出去，
+                # 且 1ms 延迟对 SSE 流式体验几乎无感知。
+                await asyncio.sleep(0.001)
+        except Exception as e:
+            yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
 
     return StreamingResponse(
         event_generator(),

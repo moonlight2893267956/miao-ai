@@ -184,7 +184,7 @@ async def invoke(
         raise HTTPException(status_code=429, detail=f"rate limit exceeded for agent '{name}'")
     config = _build_trace_config(body.metadata)
     try:
-        result_dict = await asyncio.to_thread(managed.invoke, body.input, 60.0, config)
+        result_dict = await asyncio.to_thread(managed.invoke, body.input, settings.invoke_sync_timeout, config)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"agent invoke failed: {e}")
     return InvokeResponse(
@@ -215,7 +215,7 @@ async def invoke_stream(
 
     async def event_generator():
         try:
-            async for line in managed.invoke_stream(body.input, config):
+            async for line in managed.invoke_stream(body.input, config, timeout=settings.invoke_stream_timeout):
                 yield line + "\n"
                 # 强制让出事件循环，使 uvicorn transport 的写缓冲数据真正发到 socket。
                 # asyncio.sleep(0) 只让给 ready callbacks 不回 selector；

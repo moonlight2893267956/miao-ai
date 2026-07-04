@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     agent_rate_limit_qps: float = 10.0
     agent_rate_limit_burst: int = 20
 
+    # ===== Invoke Timeout =====
+    invoke_sync_timeout: float = 180.0
+    invoke_stream_timeout: float = 120.0
+
     # ===== Async Invoke / Webhook =====
     invoke_async_max_workers: int = 4
     invoke_async_default_timeout: float = 300.0

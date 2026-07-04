@@ -33,15 +33,20 @@ def _env_from_model(model: LlmModel) -> dict[str, str]:
     except CryptoError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
-    return {
+    env = {
         "LLM_API_KEY": api_key,
         "LLM_BASE_URL": model.provider.base_url,
         "LLM_MODEL": model.model_id,
+        "LLM_MAX_TOKENS": str(model.max_tokens),
+        "LLM_TEMPERATURE": str(model.temperature_default),
         # Backward-compatible aliases for existing DashScope-oriented agents.
         "DASHSCOPE_API_KEY": api_key,
         "DASHSCOPE_BASE_URL": model.provider.base_url,
         "DASHSCOPE_MODEL": model.model_id,
+        "DASHSCOPE_MAX_TOKENS": str(model.max_tokens),
+        "DASHSCOPE_TEMPERATURE": str(model.temperature_default),
     }
+    return env
 
 
 async def _load_model(session: AsyncSession, model_id: uuid.UUID) -> LlmModel | None:

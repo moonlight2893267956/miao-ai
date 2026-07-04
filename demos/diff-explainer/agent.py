@@ -18,8 +18,9 @@ from langchain_openai import ChatOpenAI
 # --- LLM 初始化 ---
 _llm = ChatOpenAI(
     model=os.getenv("LLM_MODEL") or os.getenv("DASHSCOPE_MODEL", "qwen-plus"),
-    temperature=0,
-    api_key=os.getenv("LLM_API_KEY") or os.getenv("DASHSCOPE_API_KEY"),
+    temperature=float(os.getenv("LLM_TEMPERATURE", os.getenv("DASHSCOPE_TEMPERATURE", "0.0"))),
+    max_tokens=int(os.getenv("LLM_MAX_TOKENS", os.getenv("DASHSCOPE_MAX_TOKENS", "4096"))),
+    api_key=os.getenv("LLM_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or "sk-placeholder",
     base_url=os.getenv("LLM_BASE_URL") or os.getenv("DASHSCOPE_BASE_URL"),
 )
 

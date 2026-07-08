@@ -80,5 +80,15 @@ jobs:
       GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
       GHCR_PULL_USER: ${{ vars.GHCR_PULL_USER || 'moonlight2893267956' }}
     steps:
+      - name: 计算部署镜像 tag
+        id: tag
+        run: |
+          RAW="${{ github.event.inputs.image_tag }}"
+          if [ -z "$RAW" ]; then RAW="${{ github.sha }}"; fi
+          case "$RAW" in
+            sha-*) TAG="$RAW" ;;
+            *) TAG="sha-$RAW" ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
       - name: echo
-        run: echo "deploy with env"
+        run: echo "tag = ${{ steps.tag.outputs.tag }}"

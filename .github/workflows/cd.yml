@@ -90,5 +90,16 @@ jobs:
             *) TAG="sha-$RAW" ;;
           esac
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-      - name: echo
-        run: echo "tag = ${{ steps.tag.outputs.tag }}"
+      - name: SSH 登录并部署
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ vars.SSH_HOST }}
+          username: ${{ vars.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ vars.SSH_PORT || 22 }}
+          command_timeout: 30m
+          script_stop: true
+        env:
+          DEPLOY_IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+        script: |
+          echo "deploy tag=$DEPLOY_IMAGE_TAG"

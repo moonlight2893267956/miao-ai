@@ -93,10 +93,10 @@ jobs:
       - name: SSH 登录并部署
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ vars.SSH_HOST }}
-          username: ${{ vars.SSH_USER }}
-          key: ${{ secrets.SSH_KEY }}
-          port: ${{ vars.SSH_PORT || '22' }}
+          host: "test.example.com"
+          username: "testuser"
+          key: "dummy-key"
+          port: "22"
           command_timeout: 30m
           script_stop: true
         script: |

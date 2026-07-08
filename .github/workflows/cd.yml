@@ -30,7 +30,8 @@ jobs:
   #    依赖层通过 gha 缓存跨运行复用，加速后续构建
   # ============================================================
   build:
-    if: ${{ github.event.inputs.image_tag == '' }}
+    # push 时必定构建；workflow_dispatch 时仅 image_tag 为空才构建（回滚时跳过）
+    if: ${{ github.event_name == 'push' || github.event.inputs.image_tag == '' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -89,9 +90,8 @@ jobs:
   # ============================================================
   deploy:
     needs: build
-    if: >-
-      always() &&
-      (github.event.inputs.image_tag != '' || needs.build.result == 'success')
+    # push 时必定部署；workflow_dispatch 时总是部署（回滚跳过 build，直接拉取旧镜像）
+    if: ${{ always() && (github.event_name == 'push' || github.event.inputs.image_tag != '' || needs.build.result == 'success') }}
     runs-on: ubuntu-latest
     # prod 环境：SSH_KEY / GHCR_PULL_TOKEN（secrets），SSH_HOST/USER/PORT/DEPLOY_PATH/GHCR_PULL_USER（vars）
     environment: prod

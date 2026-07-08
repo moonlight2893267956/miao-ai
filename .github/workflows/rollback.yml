@@ -1,0 +1,64 @@
+name: Rollback
+
+# 手动触发：填 image_tag=sha-a1b2c3d 直接回滚到旧版本
+# 跳过测试与构建，仅 SSH 到服务器拉取该 sha 标签并重启
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: '回滚目标镜像标签，例如 sha-a1b2c3d（7 位短 SHA，可在 GHCR Packages 或 `git log --oneline` 查到）'
+        required: true
+
+# 同一时间只允许一个部署流水线运行，排队而非取消
+concurrency:
+  group: cd-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ─────────────────────────────────────────────
+  # 回滚：直接拉取旧 sha 标签镜像并重启（无测试、无构建）
+  # ─────────────────────────────────────────────
+  rollback:
+    runs-on: ubuntu-latest
+    environment: prod
+    env:
+      SSH_HOST: ${{ vars.SSH_HOST }}
+      SSH_USER: ${{ vars.SSH_USER }}
+      SSH_PORT: ${{ vars.SSH_PORT || '22' }}
+      SSH_DEPLOY_PATH: ${{ vars.SSH_DEPLOY_PATH }}
+      GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+      GHCR_PULL_USER: ${{ vars.GHCR_PULL_USER }}
+      IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 配置 SSH 并回滚
+        run: |
+          set -e
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+          SSH="ssh -i ~/.ssh/deploy_key -p $SSH_PORT -o StrictHostKeyChecking=no"
+          SCP="scp -i ~/.ssh/deploy_key -P $SSH_PORT -o StrictHostKeyChecking=no"
+
+          $SSH "$SSH_USER@$SSH_HOST" "mkdir -p $SSH_DEPLOY_PATH"
+          $SCP docker-compose.prod.yml "$SSH_USER@$SSH_HOST:$SSH_DEPLOY_PATH/"
+          $SCP scripts/deploy-remote.sh "$SSH_USER@$SSH_HOST:/tmp/deploy-remote.sh"
+
+          $SSH "$SSH_USER@$SSH_HOST" \
+            "chmod +x /tmp/deploy-remote.sh && DEPLOY_DIR='$SSH_DEPLOY_PATH' IMAGE_TAG='$IMAGE_TAG' GHCR_TOKEN='$GHCR_PULL_TOKEN' GHCR_OWNER='$GHCR_PULL_USER' /tmp/deploy-remote.sh"
+
+      - name: 回滚失败提示
+        if: failure()
+        run: |
+          echo "::error::回滚失败! 请检查上方日志"
+          echo "排查步骤:"
+          echo "  1. 确认 image_tag 填的是历史发布过的 sha 标签（GHCR Packages 中可见）"
+          echo "  2. SSH 到服务器: ssh $SSH_USER@$SSH_HOST"
+          echo "  3. 查看日志: cd $SSH_DEPLOY_PATH && docker compose -f docker-compose.prod.yml logs --tail=50"

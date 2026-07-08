@@ -15,7 +15,8 @@ WORKDIR /app/frontend
 RUN corepack enable && corepack prepare pnpm@8.15.9 --activate
 
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN --mount=type=cache,target=/root/.pnpm-store \
+    pnpm install --frozen-lockfile --store-dir=/root/.pnpm-store
 
 FROM node:20-slim AS builder
 
@@ -37,7 +38,8 @@ ENV NEXT_PUBLIC_API_BASE=$NEXT_PUBLIC_API_BASE \
 
 COPY --from=deps /app/frontend/node_modules ./node_modules
 COPY frontend ./
-RUN pnpm build
+RUN --mount=type=cache,target=/app/frontend/.next/cache \
+    pnpm build
 
 FROM node:20-slim AS runner
 

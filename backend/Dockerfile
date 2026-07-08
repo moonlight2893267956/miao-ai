@@ -22,9 +22,9 @@ ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
     PIP_INDEX_URL=${PIP_INDEX_URL} \
-    PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST}
+    PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST} \
+    UV_CACHE_DIR=/root/.cache/uv
 
 WORKDIR /app/backend
 
@@ -46,17 +46,24 @@ RUN set -eux; \
     fi; \
     apt-get update; \
     apt-get install -y --no-install-recommends build-essential ca-certificates curl; \
-    rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/90proxy
+    rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/90proxy; \
+    pip install --no-cache-dir --upgrade pip; \
+    pip install --no-cache-dir uv
 
+# 依赖层：仅当 pyproject.toml / uv.lock 变化时才重建（BuildKit 缓存挂载，跨 CD 持久）
 COPY backend/pyproject.toml backend/uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv export --frozen --no-hashes --no-dev -o /tmp/requirements.txt \
+    && uv pip install --system -r /tmp/requirements.txt
+
+# 源码层：每次 push 都会变动，但只做廉价的可编辑安装（不再重装依赖）
 COPY backend/app ./app
 COPY backend/agent_templates ./agent_templates
 COPY backend/alembic.ini ./alembic.ini
 COPY backend/alembic ./alembic
 
-RUN pip install --upgrade pip \
-    && pip install uv \
-    && pip install -e .
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -e . --no-deps
 
 EXPOSE 8000
 

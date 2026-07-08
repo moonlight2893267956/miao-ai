@@ -1,23 +1,116 @@
 name: CD
 
-# 仅 push 到 main 时部署（PR 不触发）
+# 触发：
+#   1. push 到 main → 常规部署（构建当前 commit 并发布）
+#   2. 手动 workflow_dispatch，留空 image_tag → 同常规部署
+#      填写已存在的镜像 tag（如 sha-abc1234）→ 仅回滚，不重新构建
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "回滚用：指定已存在的镜像 tag（如 sha-abc1234）。留空则部署当前 commit。"
+        required: false
+        default: ""
+
+# GITHUB_TOKEN 需要 packages:write 才能推送镜像到 GHCR
+permissions:
+  contents: read
+  packages: write
 
 concurrency:
   group: cd-main
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  # ============================================================
+  # 1. 构建并推送镜像到 GHCR（仅在常规部署时执行；回滚时跳过）
+  #    按 commit SHA 打不可变 tag：sha-<sha> / prod / latest
+  #    依赖层通过 gha 缓存跨运行复用，加速后续构建
+  # ============================================================
+  build:
+    if: ${{ github.event.inputs.image_tag == '' }}
     runs-on: ubuntu-latest
-    # 引用 prod 环境：
-    #   - SSH_KEY 放 Environment secrets（敏感，日志打码）
-    #   - 其余（SSH_HOST/USER/PORT/DEPLOY_PATH）放 Environment variables，用 vars. 读取
-    # 可在环境里开启保护规则（如部署前需审批、仅 main 可部署）。
-    environment: prod
+    permissions:
+      contents: read
+      packages: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送 backend
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/backend:sha-${{ github.sha }}
+            ghcr.io/${{ github.repository }}/backend:prod
+            ghcr.io/${{ github.repository }}/backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 构建并推送 frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: frontend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/frontend:sha-${{ github.sha }}
+            ghcr.io/${{ github.repository }}/frontend:prod
+            ghcr.io/${{ github.repository }}/frontend:latest
+          build-args: |
+            NEXT_PUBLIC_API_BASE=${{ vars.NEXT_PUBLIC_API_BASE || 'https://agent.yunmiao.site' }}
+            NEXT_PUBLIC_LANGFUSE_BASE_URL=${{ vars.NEXT_PUBLIC_LANGFUSE_BASE_URL || 'https://cloud.langfuse.com' }}
+            NEXT_PUBLIC_LANGFUSE_PROJECT_ID=${{ vars.NEXT_PUBLIC_LANGFUSE_PROJECT_ID || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================================
+  # 2. 登录生产服务器，拉取指定 tag 的镜像并部署
+  #    - 常规部署：IMAGE_TAG = sha-<当前 commit>
+  #    - 回滚部署：IMAGE_TAG = 传入的旧 sha tag（build 步骤跳过）
+  #    服务器仅需 read:packages 权限即可 docker pull GHCR 镜像
+  # ============================================================
+  deploy:
+    needs: build
+    if: >-
+      always() &&
+      (github.event.inputs.image_tag != '' || needs.build.result == 'success')
+    runs-on: ubuntu-latest
+    # prod 环境：SSH_KEY / GHCR_PULL_TOKEN（secrets），SSH_HOST/USER/PORT/DEPLOY_PATH/GHCR_PULL_USER（vars）
+    environment: prod
+    env:
+      GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+      GHCR_PULL_USER: ${{ vars.GHCR_PULL_USER || 'moonlight2893267956' }}
+    steps:
+      - name: 计算部署镜像 tag
+        id: tag
+        run: |
+          RAW="${{ github.event.inputs.image_tag }}"
+          if [ -z "$RAW" ]; then RAW="${{ github.sha }}"; fi
+          # 归一化为 sha-<commit>
+          case "$RAW" in
+            sha-*) TAG="$RAW" ;;
+            *) TAG="sha-$RAW" ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: SSH 登录并部署
         uses: appleboy/ssh-action@v1.2.0
         with:
@@ -27,51 +120,59 @@ jobs:
           port: ${{ vars.SSH_PORT || 22 }}
           command_timeout: 30m
           script_stop: true
-          script: |
-            set -e
-            cd "${{ vars.SSH_DEPLOY_PATH || '$HOME/apps/miao-ai' }}"
+          # 将下方变量注入远端 shell（token 不会回显）
+          envs: GHCR_PULL_TOKEN,GHCR_PULL_USER,DEPLOY_IMAGE_TAG
+        env:
+          DEPLOY_IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+        script: |
+          set -e
+          cd "${{ vars.SSH_DEPLOY_PATH || '$HOME/apps/miao-ai' }}"
 
-            # 生产编排（镜像在服务器构建，不接镜像仓库）
-            COMPOSE="docker compose -f docker-compose.prod.yml"
+          COMPOSE="docker compose -f docker-compose.prod.yml"
 
-            # 以 main 为准硬同步（部署服务器标准做法，不依赖工作树干净）
-            # 1) 先把本地未提交改动暂存到 stash（可 git stash pop 恢复，绝不丢失）
-            # 2) 再 fetch + reset --hard origin/main，保证服务器代码与仓库完全一致
-            echo ">>> 同步到 main（fetch + 硬重置）"
-            git fetch origin main
-            if [ -n "$(git status --porcelain)" ]; then
-              echo ">>> 检测到本地未提交改动，已暂存到 stash（可恢复：git stash pop）"
-              git stash push -u -m "cd-auto-$(date +%s)" || true
+          # 同步到 main，保证服务器上的 compose 文件与仓库一致（以 main 为准）
+          echo ">>> 同步 compose 到 main（fetch + 硬重置）"
+          git fetch origin main
+          if [ -n "$(git status --porcelain)" ]; then
+            echo ">>> 检测到本地未提交改动，已暂存到 stash（可恢复：git stash pop）"
+            git stash push -u -m "cd-auto-$(date +%s)" || true
+          fi
+          git checkout main || git switch main
+          git reset --hard origin/main
+
+          # 登录 GHCR（仅 read:packages 的 PAT），拉取镜像用
+          echo ">>> docker login ghcr.io"
+          echo "$GHCR_PULL_TOKEN" | docker login ghcr.io -u "$GHCR_PULL_USER" --password-stdin
+
+          # 拉取并部署指定 tag（IMAGE_TAG 由 compose 的 ${IMAGE_TAG:-prod} 读取）
+          echo ">>> 部署镜像 tag: $DEPLOY_IMAGE_TAG"
+          IMAGE_TAG="$DEPLOY_IMAGE_TAG" $COMPOSE pull
+          IMAGE_TAG="$DEPLOY_IMAGE_TAG" $COMPOSE up -d
+
+          echo ">>> 等待 backend 健康（最多 ~3 分钟）"
+          status="starting"
+          for i in $(seq 1 36); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' miao-backend 2>/dev/null || echo "starting")
+            echo "backend health: $status ($i/36)"
+            if [ "$status" = "healthy" ]; then
+              echo "backend healthy ✅"
+              break
             fi
-            git checkout main || git switch main
-            git reset --hard origin/main
-
-            echo ">>> docker compose up -d --build"
-            $COMPOSE up -d --build
-
-            echo ">>> 等待 backend 健康（最多 ~3 分钟）"
-            status="starting"
-            for i in $(seq 1 36); do
-              status=$(docker inspect -f '{{.State.Health.Status}}' miao-backend 2>/dev/null || echo "starting")
-              echo "backend health: $status ($i/36)"
-              if [ "$status" = "healthy" ]; then
-                echo "backend healthy ✅"
-                break
-              fi
-              sleep 5
-            done
-            if [ "$status" != "healthy" ]; then
-              echo "::error::backend 未在超时内进入 healthy 状态"
-              $COMPOSE ps
-              $COMPOSE logs backend
-              exit 1
-            fi
-
-            echo ">>> alembic 数据库迁移"
-            $COMPOSE exec -T backend alembic upgrade head
-
-            echo ">>> 状态"
+            sleep 5
+          done
+          if [ "$status" != "healthy" ]; then
+            echo "::error::backend 未在超时内进入 healthy 状态"
             $COMPOSE ps
+            $COMPOSE logs backend
+            exit 1
+          fi
 
-            # 回收未被引用的旧镜像，释放磁盘（不删 volume）
-            docker image prune -f
+          echo ">>> alembic 数据库迁移"
+          $COMPOSE exec -T backend alembic upgrade head
+
+          echo ">>> 状态"
+          $COMPOSE ps
+
+          # 回收悬空（未打 tag / 未被引用）镜像，释放磁盘。
+          # 已打 tag 的 GHCR 镜像（prod/latest/sha-*）保留，支持秒级回滚。
+          docker image prune -f

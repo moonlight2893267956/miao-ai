@@ -2,10 +2,11 @@ ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG http_proxy
 ARG https_proxy
-ARG APT_MIRROR=http://mirrors.aliyun.com/debian
-ARG APT_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
-ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
-ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
+# CI（GitHub Actions runner）负责构建并推送 GHCR，直连上游源即可，无需国内镜像。
+ARG APT_MIRROR=http://deb.debian.org/debian
+ARG APT_SECURITY_MIRROR=http://deb.debian.org/debian-security
+ARG PIP_INDEX_URL=https://pypi.org/simple/
+ARG PIP_TRUSTED_HOST=
 
 FROM docker:27-cli AS docker-cli
 
@@ -15,10 +16,10 @@ ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG http_proxy
 ARG https_proxy
-ARG APT_MIRROR=http://mirrors.aliyun.com/debian
-ARG APT_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
-ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
-ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
+ARG APT_MIRROR=http://deb.debian.org/debian
+ARG APT_SECURITY_MIRROR=http://deb.debian.org/debian-security
+ARG PIP_INDEX_URL=https://pypi.org/simple/
+ARG PIP_TRUSTED_HOST=
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

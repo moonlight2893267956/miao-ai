@@ -53,8 +53,8 @@ RUN set -eux; \
 # 依赖层：仅当 pyproject.toml / uv.lock 变化时才重建（BuildKit 缓存挂载，跨 CD 持久）
 COPY backend/pyproject.toml backend/uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv export --frozen --no-hashes --no-dev -o /tmp/requirements.txt \
-    && uv pip install --system -r /tmp/requirements.txt
+    uv export --frozen --no-hashes --no-dev --no-emit-project -o /tmp/requirements.txt \
+    && cd /tmp && uv pip install --system -r /tmp/requirements.txt
 
 # 源码层：每次 push 都会变动，但只做廉价的可编辑安装（不再重装依赖）
 COPY backend/app ./app

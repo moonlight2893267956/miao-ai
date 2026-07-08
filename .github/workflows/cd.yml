@@ -76,6 +76,9 @@ jobs:
     if: ${{ always() && (github.event_name == 'push' || github.event.inputs.image_tag != '' || needs.build.result == 'success') }}
     runs-on: ubuntu-latest
     environment: prod
+    env:
+      GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+      GHCR_PULL_USER: ${{ vars.GHCR_PULL_USER || 'moonlight2893267956' }}
     steps:
       - name: echo
-        run: echo "deploy placeholder"
+        run: echo "deploy with env"

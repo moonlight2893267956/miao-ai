@@ -47,6 +47,12 @@ jobs:
           SSH="ssh -i ~/.ssh/deploy_key -p $SSH_PORT -o StrictHostKeyChecking=no"
           SCP="scp -i ~/.ssh/deploy_key -P $SSH_PORT -o StrictHostKeyChecking=no"
 
+          # 解析 $HOME：OpenSSH 9+ 的 scp 默认走 SFTP 后端，远端不展开 $HOME，需先转绝对路径
+          if [[ "$SSH_DEPLOY_PATH" == \$HOME* ]]; then
+            REMOTE_HOME=$($SSH "$SSH_USER@$SSH_HOST" 'echo $HOME')
+            SSH_DEPLOY_PATH="${SSH_DEPLOY_PATH/#\$HOME/$REMOTE_HOME}"
+          fi
+
           $SSH "$SSH_USER@$SSH_HOST" "mkdir -p $SSH_DEPLOY_PATH"
           $SCP docker-compose.prod.yml "$SSH_USER@$SSH_HOST:$SSH_DEPLOY_PATH/"
           $SCP scripts/deploy-remote.sh "$SSH_USER@$SSH_HOST:/tmp/deploy-remote.sh"

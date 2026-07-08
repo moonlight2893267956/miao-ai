@@ -96,10 +96,8 @@ jobs:
           host: ${{ vars.SSH_HOST }}
           username: ${{ vars.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
-          port: ${{ vars.SSH_PORT || 22 }}
+          port: ${{ vars.SSH_PORT || '22' }}
           command_timeout: 30m
           script_stop: true
-        env:
-          DEPLOY_IMAGE_TAG: ${{ steps.tag.outputs.tag }}
         script: |
-          echo "deploy tag=$DEPLOY_IMAGE_TAG"
+          echo "hello"

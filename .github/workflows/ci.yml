@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 防止并发 CI 抢占同一 runner 资源
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------
+  # 1. YAML 格式校验
+  # ---------------------------------------------------------------
+  yaml-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Yamllint
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          config_file: .yamllint.yml
+
+  # ---------------------------------------------------------------
+  # 2. compose 配置校验（语法 + 必填变量）
+  #    用 dummy .env，绝不接触真实密钥
+  #    注意：miao-ai 依赖外部 miao-infra-net 网络/MySQL/Redis，
+  #    CI runner 内无法拉起，故只做配置校验，不真拉起服务。
+  # ---------------------------------------------------------------
+  compose-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 写入 CI 用 dummy .env
+        run: |
+          cat > .env <<'EOF'
+          # ===== CI 占位值，仅用于 docker compose config 语法校验，不含真实密钥 =====
+          LANGFUSE_BASE_URL=https://cloud.langfuse.com
+          LANGFUSE_PUBLIC_KEY=pk-lf-ci-placeholder
+          LANGFUSE_SECRET_KEY=sk-lf-ci-placeholder
+          NEXT_PUBLIC_LANGFUSE_PROJECT_ID=ci-placeholder
+
+          DATABASE_URL=mysql+aiomysql://miao:ci_pw@miao-mysql:3306/miao_ai?charset=utf8mb4
+
+          TENCENT_SECRET_ID=ci-placeholder
+          TENCENT_SECRET_KEY=ci-placeholder
+          TENCENT_REGION=ap-shanghai
+          TENCENT_BUCKET=miao-agents-ci
+          COS_ENDPOINT=https://cos.ap-shanghai.myqcloud.com
+
+          DASHSCOPE_API_KEY=sk-ci-placeholder
+          DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+          DASHSCOPE_MODEL=qwen-plus
+
+          ENCRYPTION_KEY=ci-placeholder-encryption-key-0123456789==
+
+          AGENT_RUNTIME_MODE=docker
+          NEXT_PUBLIC_API_BASE=https://agent.yunmiao.site
+          NEXT_PUBLIC_LANGFUSE_BASE_URL=https://cloud.langfuse.com
+          EOF
+      - name: 校验生产 compose 配置
+        run: docker compose -f docker-compose.prod.yml config -q

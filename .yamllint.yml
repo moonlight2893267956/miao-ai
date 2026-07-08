@@ -1,0 +1,19 @@
+---
+# yamllint 配置
+# compose 文件含长行、YAML 1.1 布尔值等，放宽默认规则避免误报。
+extends: default
+
+rules:
+  line-length:
+    max: 120
+    level: warning
+  truthy:
+    # 允许 on/off/yes/no 作为字符串键（docker compose 常用）
+    allowed-values: ["true", "false"]
+    check-keys: false
+  document-start: disable
+  comments:
+    min-spaces-from-content: 1
+  indentation:
+    spaces: 2
+    indent-sequences: true

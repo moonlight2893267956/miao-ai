@@ -1,0 +1,67 @@
+name: CD
+
+# 仅 push 到 main 时部署（PR 不触发）
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: cd-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # 引用 prod 环境：
+    #   - SSH_KEY 放 Environment secrets（敏感，日志打码）
+    #   - 其余（SSH_HOST/USER/PORT/DEPLOY_PATH）放 Environment variables，用 vars. 读取
+    # 可在环境里开启保护规则（如部署前需审批、仅 main 可部署）。
+    environment: prod
+    steps:
+      - name: SSH 登录并部署
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ vars.SSH_HOST }}
+          username: ${{ vars.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ vars.SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -e
+            cd "${{ vars.SSH_DEPLOY_PATH || '$HOME/apps/miao-ai' }}"
+
+            # 生产编排（镜像在服务器构建，不接镜像仓库）
+            COMPOSE="docker compose -f docker-compose.prod.yml"
+
+            echo ">>> git pull（要求工作树干净，仅快进）"
+            git pull --ff-only
+
+            echo ">>> docker compose up -d --build"
+            $COMPOSE up -d --build
+
+            echo ">>> 等待 backend 健康（最多 ~3 分钟）"
+            status="starting"
+            for i in $(seq 1 36); do
+              status=$(docker inspect -f '{{.State.Health.Status}}' miao-backend 2>/dev/null || echo "starting")
+              echo "backend health: $status ($i/36)"
+              if [ "$status" = "healthy" ]; then
+                echo "backend healthy ✅"
+                break
+              fi
+              sleep 5
+            done
+            if [ "$status" != "healthy" ]; then
+              echo "::error::backend 未在超时内进入 healthy 状态"
+              $COMPOSE ps
+              $COMPOSE logs backend
+              exit 1
+            fi
+
+            echo ">>> alembic 数据库迁移"
+            $COMPOSE exec -T backend alembic upgrade head
+
+            echo ">>> 状态"
+            $COMPOSE ps
+
+            # 回收未被引用的旧镜像，释放磁盘（不删 volume）
+            docker image prune -f

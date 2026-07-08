@@ -25,6 +25,7 @@ jobs:
           username: ${{ vars.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
           port: ${{ vars.SSH_PORT || 22 }}
+          command_timeout: 30m
           script_stop: true
           script: |
             set -e

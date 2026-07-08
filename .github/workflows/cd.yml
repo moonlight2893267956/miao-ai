@@ -70,3 +70,12 @@ jobs:
             NEXT_PUBLIC_LANGFUSE_PROJECT_ID=${{ vars.NEXT_PUBLIC_LANGFUSE_PROJECT_ID || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    if: ${{ always() && (github.event_name == 'push' || github.event.inputs.image_tag != '' || needs.build.result == 'success') }}
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - name: echo
+        run: echo "deploy placeholder"

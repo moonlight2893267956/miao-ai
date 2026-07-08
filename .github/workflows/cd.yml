@@ -33,8 +33,17 @@ jobs:
             # 生产编排（镜像在服务器构建，不接镜像仓库）
             COMPOSE="docker compose -f docker-compose.prod.yml"
 
-            echo ">>> git pull（要求工作树干净，仅快进）"
-            git pull --ff-only
+            # 以 main 为准硬同步（部署服务器标准做法，不依赖工作树干净）
+            # 1) 先把本地未提交改动暂存到 stash（可 git stash pop 恢复，绝不丢失）
+            # 2) 再 fetch + reset --hard origin/main，保证服务器代码与仓库完全一致
+            echo ">>> 同步到 main（fetch + 硬重置）"
+            git fetch origin main
+            if [ -n "$(git status --porcelain)" ]; then
+              echo ">>> 检测到本地未提交改动，已暂存到 stash（可恢复：git stash pop）"
+              git stash push -u -m "cd-auto-$(date +%s)" || true
+            fi
+            git checkout main || git switch main
+            git reset --hard origin/main
 
             echo ">>> docker compose up -d --build"
             $COMPOSE up -d --build

@@ -64,14 +64,16 @@ except Exception:
 WORK_ROOT = Path("/tmp/miao/agents")
 
 
-async def _recover_active_agents() -> None:
-    """启动时从 DB 恢复所有 is_active 的 agent，启动子进程。
+async def _prewarm_active_agents() -> None:
+    """重启后后台预热所有 is_active 的 agent。
 
-    注意：Docker 模式下 build 较慢（pip install），此函数应在后台执行，
-    不阻塞 FastAPI lifespan 启动。
+    只下载代码 + 构建 venv / docker 镜像（prepare），**不启动**进程/容器。
+    这样启动期不会把所有 agent 都跑起来占用内存，首次调用时通过
+    `_try_auto_activate` 只做快速的 start（镜像/venv 已就绪，跳过 build）。
+
+    并发数由 settings.agent_max_concurrent 限制，避免一次性 docker build 打满资源。
     """
-    log.info("miao.recovery.start")
-    registry = AgentRegistry.instance()
+    log.info("miao.prewarm.start")
     runner_path = Path(__file__).parents[1] / "agent_templates" / "miao_runner.py"
 
     async with AsyncSessionLocal() as session:
@@ -80,84 +82,85 @@ async def _recover_active_agents() -> None:
         )
         active_versions = result.scalars().all()
 
-    recovered = 0
-    for av in active_versions:
-        # 进程池限制：启动前检查并发上限
-        if registry.running_count() >= settings.agent_max_concurrent:
-            log.warning("miao.recovery.limit reached=%d max=%d",
-                        registry.running_count(), settings.agent_max_concurrent)
-            break
-        async with AsyncSessionLocal() as session:
-            r = await session.execute(select(Agent).where(Agent.id == av.agent_id))
-            agent = r.scalar_one_or_none()
-            llm_env = await resolve_llm_env(agent.id, session) if agent else {}
-        if not agent:
-            log.warning("miao.recovery.agent_not_found version_id=%s", av.id)
-            continue
+    if not active_versions:
+        log.info("miao.prewarm.done prepared=0 total_active=0")
+        return
 
-        work_dir = WORK_ROOT / agent.name
-        work_dir.mkdir(parents=True, exist_ok=True)
-        zip_path = work_dir / "source.zip"
-        try:
-            await asyncio.to_thread(download_zip, av.artifact_url, zip_path)
-        except Exception as e:
-            log.warning("miao.recovery.download_failed agent=%s error=%s",
-                        agent.name, e)
-            # 恢复失败：标记 is_active=False 避免下次启动再次尝试
-            async with AsyncSessionLocal() as s:
-                await s.execute(
-                    update(AgentVersion)
-                    .where(AgentVersion.id == av.id)
-                    .values(is_active=False)
-                )
-                await s.commit()
-            continue
+    semaphore = asyncio.Semaphore(max(1, settings.agent_max_concurrent))
+    prepared = 0
 
-        # 清空旧代码（保留 .venv/.build_hash，排除刚下载的 source.zip）
-        for p in work_dir.iterdir():
-            if p.name in (".venv", ".build_hash", "agent.log", "source.zip"):
-                continue
-            if p.is_dir():
-                shutil.rmtree(p)
+    async def _prewarm_one(av: AgentVersion) -> None:
+        nonlocal prepared
+        async with semaphore:
+            async with AsyncSessionLocal() as session:
+                r = await session.execute(select(Agent).where(Agent.id == av.agent_id))
+                agent = r.scalar_one_or_none()
+                llm_env = await resolve_llm_env(agent.id, session) if agent else {}
+            if not agent:
+                log.warning("miao.prewarm.agent_not_found version_id=%s", av.id)
+                return
+
+            work_dir = WORK_ROOT / agent.name
+            work_dir.mkdir(parents=True, exist_ok=True)
+            zip_path = work_dir / "source.zip"
+            try:
+                await asyncio.to_thread(download_zip, av.artifact_url, zip_path)
+            except Exception as e:
+                log.warning("miao.prewarm.download_failed agent=%s error=%s", agent.name, e)
+                # 预热失败：标记 is_active=False 避免下次启动再次尝试
+                async with AsyncSessionLocal() as s:
+                    await s.execute(
+                        update(AgentVersion)
+                        .where(AgentVersion.id == av.id)
+                        .values(is_active=False)
+                    )
+                    await s.commit()
+                return
+
+            # 清空旧代码（保留 .venv/.build_hash，排除刚下载的 source.zip）
+            for p in work_dir.iterdir():
+                if p.name in (".venv", ".build_hash", "agent.log", "source.zip"):
+                    continue
+                if p.is_dir():
+                    shutil.rmtree(p)
+                else:
+                    p.unlink()
+            try:
+                with zipfile.ZipFile(zip_path) as zf:
+                    zf.extractall(work_dir)
+            except Exception as e:
+                log.warning("miao.prewarm.extract_failed agent=%s error=%s", agent.name, e)
+                async with AsyncSessionLocal() as s:
+                    await s.execute(
+                        update(AgentVersion)
+                        .where(AgentVersion.id == av.id)
+                        .values(is_active=False)
+                    )
+                    await s.commit()
+                return
+            zip_path.unlink(missing_ok=True)
+
+            managed = ManagedAgent(
+                name=agent.name,
+                version_id=str(av.id),
+                work_dir=work_dir,
+                runner_path=runner_path,
+                entrypoint=av.entrypoint,
+                runtime_mode=settings.agent_runtime_mode,
+                max_restarts=settings.agent_max_restarts,
+                restart_base_delay=settings.agent_restart_base_delay,
+                llm_env=llm_env,
+            )
+            ok = await asyncio.to_thread(managed.prepare)
+            if ok:
+                prepared += 1
+                log.info("miao.prewarm.ok agent=%s (not started, starts on first invoke)", agent.name)
             else:
-                p.unlink()
-        try:
-            with zipfile.ZipFile(zip_path) as zf:
-                zf.extractall(work_dir)
-        except Exception as e:
-            log.warning("miao.recovery.extract_failed agent=%s error=%s", agent.name, e)
-            async with AsyncSessionLocal() as s:
-                await s.execute(
-                    update(AgentVersion)
-                    .where(AgentVersion.id == av.id)
-                    .values(is_active=False)
-                )
-                await s.commit()
-            continue
-        zip_path.unlink(missing_ok=True)
+                log.warning("miao.prewarm.failed agent=%s error=%s", agent.name, managed.last_error)
 
-        managed = ManagedAgent(
-            name=agent.name,
-            version_id=str(av.id),
-            work_dir=work_dir,
-            runner_path=runner_path,
-            entrypoint=av.entrypoint,
-            runtime_mode=settings.agent_runtime_mode,
-            max_restarts=settings.agent_max_restarts,
-            restart_base_delay=settings.agent_restart_base_delay,
-            llm_env=llm_env,
-        )
-        ok = await asyncio.to_thread(managed.build_and_start)
-        if ok:
-            await registry.set(managed)
-            recovered += 1
-            log.info("miao.recovery.ok agent=%s port=%d", agent.name, managed.port)
-        else:
-            log.warning("miao.recovery.failed agent=%s error=%s",
-                        agent.name, managed.last_error)
-
-    log.info("miao.recovery.done recovered=%d total_active=%d",
-             recovered, len(active_versions))
+    await asyncio.gather(*[_prewarm_one(av) for av in active_versions])
+    log.info("miao.prewarm.done prepared=%d total_active=%d",
+             prepared, len(active_versions))
 
 
 async def _agent_watchdog() -> None:
@@ -206,18 +209,18 @@ async def _agent_watchdog() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("miao.startup", debug=settings.debug)
-    # Phase 2: 后台恢复 is_active 的 agent（不阻塞启动，Docker build 较慢）
-    recovery_task = asyncio.create_task(_recover_active_agents())
+    # 后台预热 is_active 的 agent（仅下载+构建，不启动进程，不阻塞启动）
+    prewarm_task = asyncio.create_task(_prewarm_active_agents())
     # 启动后台 watchdog
     watchdog_task = asyncio.create_task(_agent_watchdog())
     # 创建异步任务 worker
     app.state.task_worker = TaskWorker(max_workers=settings.invoke_async_max_workers)
     yield
     log.info("miao.shutdown")
-    # 停止 recovery（如果还在跑）
-    recovery_task.cancel()
+    # 停止 prewarm（如果还在跑）
+    prewarm_task.cancel()
     try:
-        await recovery_task
+        await prewarm_task
     except asyncio.CancelledError:
         pass
     # 停止 worker（等待运行中任务完成）

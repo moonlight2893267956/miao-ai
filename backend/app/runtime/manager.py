@@ -94,6 +94,16 @@ class ManagedAgent:
             return self._build_and_start_docker()
         return self._build_and_start_venv()
 
+    def prepare(self) -> bool:
+        """仅构建产物（venv 或 docker 镜像），不启动进程/容器。幂等。
+
+        用于重启后的后台预热：让首次调用时只做快速 start，
+        而不在启动期把所有 agent 都跑起来占用运行时资源。
+        """
+        if self.runtime_mode == "docker":
+            return self._prepare_docker()
+        return self._prepare_venv()
+
     def _start_docker_container(self) -> bool:
         """仅启动容器（不重新 build），用于 idle 唤醒场景。"""
         import os
@@ -149,9 +159,8 @@ class ManagedAgent:
             log.exception("docker.container.resume_failed agent=%s", self.name)
             return False
 
-    def _build_and_start_venv(self) -> bool:
-        """构建 venv + 启动子进程。"""
-        self.status = "building"
+    def _prepare_venv(self) -> bool:
+        """构建 venv（如果尚未构建）。不启动进程。幂等。"""
         self.last_error = None
         try:
             builder = VenvBuilder(self.work_dir)
@@ -159,28 +168,30 @@ class ManagedAgent:
                 log.info("runtime.venv.build agent=%s", self.name)
                 builder.build()
             self.venv_dir = builder.venv_dir
+            return True
         except Exception as e:
-            self.status = "crashed"
             self.last_error = f"venv build failed: {e}"
             log.exception("runtime.venv.build_failed agent=%s", self.name)
             return False
+
+    def _build_and_start_venv(self) -> bool:
+        """构建 venv + 启动子进程。"""
+        self.status = "building"
+        if not self._prepare_venv():
+            self.status = "crashed"
+            return False
         return self._start_process()
 
-    def _build_and_start_docker(self) -> bool:
-        """构建 Docker 镜像 + 启动容器。"""
+    def _prepare_docker(self) -> bool:
+        """构建 Docker 镜像（如果尚未存在）。不启动容器。幂等。"""
         import os
-        from .docker import DockerBuilder, DockerRunner, build_dockerfile, docker_available, image_exists
+        from .docker import DockerBuilder, build_dockerfile, docker_available, image_exists
 
         if not docker_available():
-            self.status = "crashed"
             self.last_error = "docker not available"
             return False
-
-        self.status = "building"
         self.last_error = None
         image_tag = f"miao-agent:{self.name}-{self.version_id[:8]}"
-        container_name = f"miao-{self.name}"
-        self._container_name = container_name
 
         try:
             # 生成 Dockerfile + .dockerignore + 复制 runner
@@ -194,46 +205,22 @@ class ManagedAgent:
                 log.info("docker.build agent=%s tag=%s", self.name, image_tag)
                 builder.build(no_cache=True)
 
-            # 记录已构建的 image tag，idle 唤醒时可跳过 build
+            # 记录已构建的 image tag，idle 唤醒 / 首次调用时可跳过 build
             self._image_tag = image_tag
-
-            # 准备 env_vars（通过 docker run -e 传入，不写入镜像）
-            env_vars = {
-                "LANGFUSE_PUBLIC_KEY": os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
-                "LANGFUSE_SECRET_KEY": os.environ.get("LANGFUSE_SECRET_KEY", ""),
-                "LANGFUSE_BASE_URL": os.environ.get("LANGFUSE_BASE_URL", ""),
-            }
-            env_vars.update(self.llm_env)
-
-            # 共享 docker 网络（agent 容器 join miao-backend 所在网络）
-            shared_network = _detect_shared_network()
-            runner = DockerRunner(
-                image_tag=image_tag,
-                container_name=container_name,
-                cpu="1.0",
-                memory="512m",
-                env_vars=env_vars,
-                shared_network=shared_network,
-            )
-            runner.start()
-            self._health_url = runner.health_url
-
-            if not wait_for_health_url(runner.health_url, timeout=60):
-                runner.stop()
-                self.status = "crashed"
-                self.last_error = f"docker container health check timeout (url={runner.health_url})"
-                return False
-
-            self._docker = runner
-            self.status = "running"
-            self.last_invoke_at = time.time()
-            log.info("docker.agent.started agent=%s health_url=%s", self.name, runner.health_url)
             return True
         except Exception as e:
-            self.status = "crashed"
-            self.last_error = f"docker build/start failed: {e}"
-            log.exception("docker.agent.failed agent=%s", self.name)
+            self.last_error = f"docker build failed: {e}"
+            log.exception("docker.agent.build_failed agent=%s", self.name)
             return False
+
+    def _build_and_start_docker(self) -> bool:
+        """构建 Docker 镜像 + 启动容器。"""
+        self.status = "building"
+        if not self._prepare_docker():
+            self.status = "crashed"
+            return False
+        # 镜像已就绪，直接启动容器
+        return self._start_docker_container()
 
     def _start_process(self) -> bool:
         """启动子进程，端口冲突时自动重试（最多 3 次）。"""

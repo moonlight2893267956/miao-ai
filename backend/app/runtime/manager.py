@@ -203,7 +203,8 @@ class ManagedAgent:
             else:
                 builder = DockerBuilder(self.work_dir, image_tag)
                 log.info("docker.build agent=%s tag=%s", self.name, image_tag)
-                builder.build(no_cache=True)
+                # 复用层缓存（requirements 不变则秒级；agent.py 变更会触发末层重建）
+                builder.build()
 
             # 记录已构建的 image tag，idle 唤醒 / 首次调用时可跳过 build
             self._image_tag = image_tag

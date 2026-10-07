@@ -74,6 +74,12 @@ def build_dockerfile(agent_dir: Path, runner_path: Path, env_vars: dict | None =
     return dockerfile_path
 
 
+# agent 镜像构建超时（秒）。langchain 等重型依赖在慢速 pypi 镜像源下实测可达 5 分钟以上，
+# 原 300s 会在构建末期被掐断，导致镜像永不产出、agent 无法启动
+# （线上 wubi-explainer 就因此反复 build 失败）。
+BUILD_TIMEOUT_SECONDS = 900
+
+
 class DockerBuilder:
     """构建 agent Docker 镜像。"""
 
@@ -81,10 +87,12 @@ class DockerBuilder:
         self.agent_dir = agent_dir
         self.image_tag = image_tag
 
-    def build(self, no_cache: bool = True) -> None:
+    def build(self, no_cache: bool = False, timeout: int = BUILD_TIMEOUT_SECONDS) -> None:
         """docker build -t <tag> <agent_dir>。
 
-        默认 no_cache=True，确保每次激活都基于最新代码构建。
+        默认 no_cache=False：复用 Docker 层缓存——requirements 未变时秒级完成，
+        而 agent.py 变更仍会触发最后一层重建，既保证代码最新又避免每次全量重装依赖
+        （原先每次激活都 --no-cache 全量重装，是构建超时的放大器）。
         """
         cmd = ["docker", "build"]
         if no_cache:
@@ -93,7 +101,7 @@ class DockerBuilder:
 
         result = subprocess.run(
             cmd,
-            capture_output=True, text=True, timeout=300,
+            capture_output=True, text=True, timeout=timeout,
         )
         if result.returncode != 0:
             raise RuntimeError(f"docker build failed: {result.stderr.strip()}")

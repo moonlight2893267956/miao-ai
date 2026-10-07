@@ -14,3 +14,5 @@ class AgentVersionRead(BaseModel):
     is_active: bool
     status: str
     created_at: datetime
+    # Agent 契约声明（agent.yaml / manifest.json 解析结果）；未声明该文件的版本为 None
+    contract: dict | None = None

@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { AlertCircle, ArrowLeft, Play, Upload, KeyRound, Copy, Trash2, RefreshCw, Download, Loader2, CheckCircle2, Cpu, StopCircle } from "lucide-react";
+import { AlertCircle, ArrowLeft, Play, Upload, KeyRound, Copy, Trash2, RefreshCw, Download, Loader2, CheckCircle2, Cpu, StopCircle, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,6 +10,8 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { ModelSelector } from "@/components/ui/model-selector";
+import { ContractForm } from "@/components/contract/contract-form";
+import { ContractOutput, hasDisplayConfig } from "@/components/contract/contract-output";
 import {
   type Agent,
   type AgentVersion,
@@ -226,10 +228,51 @@ export default function AgentDetailPage() {
   const [tryInput, setTryInput] = useState('{"question": "一句话介绍你自己"}');
   const [tryKey, setTryKey] = useState<string>("");
   const [tryOutput, setTryOutput] = useState<string | null>(null);
+  /** 结构化输出的原料（原始 output 对象）；无契约时用不到 */
+  const [tryRawOutput, setTryRawOutput] = useState<unknown>(undefined);
   const [tryError, setTryError] = useState<string | null>(null);
   const [tryTrace, setTryTrace] = useState<string | null>(null);
   const [tryBusy, setTryBusy] = useState(false);
   const [tryStream, setTryStream] = useState(false);
+  // 有契约时默认「表单模式」；无契约的 agent 只有 JSON 模式，界面与历史版本一致
+  const [tryMode, setTryMode] = useState<"form" | "json">("form");
+  const [tryExample, setTryExample] = useState("-1");
+
+  /** 生效契约：取当前激活版本的声明。没有契约（存量 agent）→ 全部走旧的 JSON 模式 */
+  const activeContract = versions.find((v) => v.is_active)?.contract ?? null;
+  const examples = activeContract?.input?.examples ?? [];
+  const inputSchema = activeContract?.input?.schema;
+
+  /** 表单与 JSON 共用一个数据源：都是这段 JSON 文本 */
+  const formValue = useMemo<Record<string, unknown>>(() => {
+    try {
+      const parsed: unknown = JSON.parse(tryInput);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : {};
+    } catch {
+      return {};
+    }
+  }, [tryInput]);
+
+  // 首次拿到契约时用第一个示例预填入参 —— 用户改几个字就能跑
+  const seededExample = useRef(false);
+  useEffect(() => {
+    if (seededExample.current) return;
+    const first = examples[0];
+    if (!first) return;
+    seededExample.current = true;
+    setTryInput(JSON.stringify(first.value, null, 2));
+    setTryExample("0");
+  }, [examples]);
+
+  function applyExample(index: number) {
+    const example = examples[index];
+    if (!example) return;
+    setTryInput(JSON.stringify(example.value, null, 2));
+    setTryExample(String(index));
+    setTryError(null);
+  }
 
   async function onTryRun() {
     if (!tryKey) {
@@ -245,6 +288,7 @@ export default function AgentDetailPage() {
     }
     setTryBusy(true);
     setTryOutput(null);
+    setTryRawOutput(undefined);
     setTryError(null);
     setTryTrace(null);
 
@@ -263,6 +307,10 @@ export default function AgentDetailPage() {
               const doneData = JSON.parse(evt.data);
               if (doneData.trace_id) setTryTrace(doneData.trace_id);
             } catch { /* ignore */ }
+            // 流式 agent 把整个 output JSON 逐段吐出来：拼完能解析就用于结构化展示
+            try {
+              setTryRawOutput(JSON.parse(chunks.join("")));
+            } catch { /* 拼起来不是完整 JSON 就保持文本展示 */ }
             break;
           }
           if (evt.event === "output") {
@@ -294,6 +342,7 @@ export default function AgentDetailPage() {
         const output = r.output as Record<string, unknown>;
         const text = output?.answer ?? output?.output ?? JSON.stringify(r.output, null, 2);
         setTryOutput(String(text));
+        setTryRawOutput(r.output);
         setTryTrace(r.trace_id);
       }
     } catch (e) {
@@ -683,12 +732,66 @@ export default function AgentDetailPage() {
                   Try Run
                 </h2>
                 <p className="detail-panel-desc">
-                  用 API Key 直接调用 /invoke，支持普通和 SSE 流式两种模式
+                  {activeContract
+                    ? "按契约表单填字段，或切到 JSON 手写；两种模式内容互通"
+                    : "用 API Key 直接调用 /invoke，支持普通和 SSE 流式两种模式"}
                 </p>
               </div>
             </div>
 
             <div className="space-y-4">
+              {activeContract && (
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div
+                    role="tablist"
+                    aria-label="入参编辑模式"
+                    className="inline-flex rounded-[var(--radius-md)] border border-[var(--color-border-default)] bg-[var(--color-surface-tertiary)] p-0.5"
+                  >
+                    {(["form", "json"] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        role="tab"
+                        aria-selected={tryMode === mode}
+                        onClick={() => setTryMode(mode)}
+                        className={`cursor-pointer rounded-[var(--radius-sm)] px-3 py-1 text-xs font-medium transition-colors ${
+                          tryMode === mode
+                            ? "bg-[var(--color-surface-primary)] text-[var(--color-brand)] shadow-[var(--shadow-xs)]"
+                            : "text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
+                        }`}
+                      >
+                        {mode === "form" ? "表单" : "JSON"}
+                      </button>
+                    ))}
+                  </div>
+                  {examples.length > 0 &&
+                    (examples.length === 1 ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => applyExample(0)}
+                      >
+                        <Sparkles className="h-3.5 w-3.5" />
+                        填充示例
+                      </Button>
+                    ) : (
+                      <select
+                        className="select-control w-auto"
+                        value={tryExample}
+                        aria-label="填充示例"
+                        onChange={(e) => applyExample(Number(e.target.value))}
+                      >
+                        <option value="-1">填充示例…</option>
+                        {examples.map((example, index) => (
+                          <option key={`${example.name ?? "example"}-${index}`} value={index}>
+                            {example.name ?? `示例 ${index + 1}`}
+                          </option>
+                        ))}
+                      </select>
+                    ))}
+                </div>
+              )}
               <div className="space-y-1.5">
                 <Label htmlFor="trykey">API Key（Bearer）</Label>
                 <Input
@@ -699,16 +802,28 @@ export default function AgentDetailPage() {
                   placeholder="miao_sk_..."
                 />
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="tryinput">Input（JSON）</Label>
-                <Textarea
-                  id="tryinput"
-                  value={tryInput}
-                  onChange={(e) => setTryInput(e.target.value)}
-                  rows={4}
-                  className="font-mono text-xs"
-                />
-              </div>
+              {activeContract && tryMode === "form" && inputSchema ? (
+                <div className="space-y-1.5">
+                  <Label>Input（按契约填写）</Label>
+                  <ContractForm
+                    schema={inputSchema}
+                    value={formValue}
+                    onChange={(next) => setTryInput(JSON.stringify(next, null, 2))}
+                    disabled={tryBusy}
+                  />
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <Label htmlFor="tryinput">Input（JSON）</Label>
+                  <Textarea
+                    id="tryinput"
+                    value={tryInput}
+                    onChange={(e) => setTryInput(e.target.value)}
+                    rows={4}
+                    className="font-mono text-xs"
+                  />
+                </div>
+              )}
               <div className="flex items-center gap-4">
                 <Button onClick={onTryRun} disabled={tryBusy}>
                   <Play className="mr-2 h-4 w-4" />
@@ -733,13 +848,17 @@ export default function AgentDetailPage() {
               {tryOutput && (
                 <div className="space-y-2">
                   <Label>Output</Label>
-                  <div
-                    className={`code-block ${
-                      tryBusy ? "streaming" : ""
-                    }`}
-                  >
-                    {tryOutput}
-                  </div>
+                  {activeContract && tryRawOutput !== undefined && hasDisplayConfig(activeContract) ? (
+                    <ContractOutput output={tryRawOutput} contract={activeContract} />
+                  ) : (
+                    <div
+                      className={`code-block ${
+                        tryBusy ? "streaming" : ""
+                      }`}
+                    >
+                      {tryOutput}
+                    </div>
+                  )}
                   {tryTrace && (
                     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--color-text-secondary)]">
                       <span>

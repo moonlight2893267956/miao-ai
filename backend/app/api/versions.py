@@ -15,6 +15,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
+from ..contract import ContractError, load_contract_from_dir, load_contract_from_zip
 from ..db import get_session
 from ..models.agent_version import AgentVersion
 from ..runtime.manager import ManagedAgent
@@ -114,7 +115,7 @@ async def upload_version(
     if not content:
         raise HTTPException(status_code=400, detail="empty file")
     try:
-        # 简单校验 zip 格式
+        # 简单校验 zip 格式 + 解析契约声明（agent.yaml / manifest.json）
         import io
 
         with zipfile.ZipFile(io.BytesIO(content)) as zf:
@@ -124,8 +125,12 @@ async def upload_version(
                     status_code=400,
                     detail="zip must contain 'agent.py' (entrypoint)",
                 )
+            # 无声明文件 → None（存量 agent 照常上传）；有声明但非法 → 400（显式声明必须可信）
+            contract = load_contract_from_zip(zf)
     except zipfile.BadZipFile:
         raise HTTPException(status_code=400, detail="not a valid zip file")
+    except ContractError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # 写临时文件并上传到 COS
     import tempfile
@@ -145,11 +150,18 @@ async def upload_version(
         artifact_url=cos_key,
         entrypoint=entrypoint,
         status="building",
+        contract=contract,
     )
     session.add(av)
     await session.commit()
     await session.refresh(av)
-    log.info("version.uploaded", agent=name, version=version, cos_key=cos_key)
+    log.info(
+        "version.uploaded",
+        agent=name,
+        version=version,
+        cos_key=cos_key,
+        has_contract=contract is not None,
+    )
     return av
 
 
@@ -218,6 +230,19 @@ async def activate_version(
     await asyncio.to_thread(download_zip, target.artifact_url, zip_path)
     await asyncio.to_thread(_extract_zip, zip_path, work_dir)
     zip_path.unlink(missing_ok=True)
+
+    # 契约自愈：以「实际解包出来的代码」为准（历史版本可能是直传 COS，或声明文件是后补的）。
+    # 目录里没有声明文件时置空 —— 新版本不带契约，旧契约必须消失，不能让 UI 继续显示过期的表单。
+    # 解析异常只记 warning 并保留原值，绝不阻断激活。
+    try:
+        target.contract = await asyncio.to_thread(load_contract_from_dir, work_dir)
+    except ContractError as exc:
+        log.warning(
+            "version.contract_resolve_failed",
+            agent=name,
+            version=version,
+            error=str(exc),
+        )
 
     # 创建 ManagedAgent 并 build+start
     runner_path = Path(__file__).parents[2] / "agent_templates" / "miao_runner.py"

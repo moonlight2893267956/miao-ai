@@ -1,0 +1,4 @@
+# 只写平台**没装**的依赖：fastapi / uvicorn / pydantic / langfuse 由平台注入，
+# 重复声明会让 venv build 变慢甚至版本冲突。
+langchain-openai>=0.1.0
+langchain-core>=0.2.0

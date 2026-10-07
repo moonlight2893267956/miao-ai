@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     DateTime,
     ForeignKey,
@@ -42,6 +43,9 @@ class AgentVersion(Base):
     artifact_url: Mapped[str] = mapped_column(Text, nullable=False)  # COS object key / URL
     requirements: Mapped[str | None] = mapped_column(Text, nullable=True)
     entrypoint: Mapped[str] = mapped_column(String(64), nullable=False, default="agent:invoke")
+    # Agent 契约声明（agent.yaml / manifest.json 的解析结果）：
+    # 契约天然「随版本」，切换 active 版本后生效契约自动跟随，无需任何清理逻辑。
+    contract: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="building")
     # building / running / crashed / idle / stopped

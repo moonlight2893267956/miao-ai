@@ -1,0 +1,84 @@
+# wubi-explainer 的 Agent 契约声明
+#
+# 规范见 docs/agent-contract.md。平台在上传 / 激活版本时解析本文件，
+# 用于 Try Run 的表单渲染、示例填充与结构化输出展示。
+#
+# 注意：YAML 会把 no / yes / on / off 解析成布尔值、把 0123 解析成八进制整数，
+# 这里所有可能引起歧义的值（编码、键位）都统一加了引号。
+api_version: 1
+name: wubi-explainer
+description: 五笔拆字解释：在给定候选字根内挑选并讲清理由
+
+input:
+  schema:
+    type: object
+    required: [char, code, positions]
+    properties:
+      char:
+        type: string
+        title: 汉字
+        description: 要讲解拆分的单个汉字，例如「照」
+      code:
+        type: string
+        title: 五笔编码
+        description: 纯小写字母，每一位对应 positions 的一项，例如「jvko」
+      positions:
+        type: array
+        title: 逐位候选字根
+        description: 位数必须与 code 一致；第 i 项的 key 必须等于 code 的第 i 个字符
+        items:
+          type: object
+          required: [key, candidates]
+          properties:
+            index: {type: integer, description: 0 起的位序}
+            key: {type: string, description: 该位对应的字母键}
+            role: {type: string, description: 该位的组字角色，可空}
+            candidates:
+              type: array
+              description: 该键位允许的字根集合，模型只能从这里挑
+              items:
+                type: object
+                required: [glyph]
+                properties:
+                  glyph: {type: string, description: 字根字形}
+                  name: {type: string, description: 字根名称}
+      notes:
+        type: array
+        title: 已知标注
+        description: 可选，逐条 message 作为额外提示
+        items:
+          type: object
+          properties:
+            message: {type: string}
+      error:
+        type: object
+        title: 本次易错点
+        description: 可选；传入后讲解会点名这两个键上的易混字根
+        properties:
+          expected: {type: string}
+          actual: {type: string}
+  examples:
+    - name: 照（jvko）
+      value:
+        char: "照"
+        code: "jvko"
+        positions:
+          - {key: "j", candidates: [{glyph: "日", name: "日字"}, {glyph: "曰", name: "曰字"}]}
+          - {key: "v", candidates: [{glyph: "刀", name: "刀字"}]}
+          - {key: "k", candidates: [{glyph: "口", name: "口字"}]}
+          - {key: "o", candidates: [{glyph: "灬", name: "四点底"}]}
+        notes: []
+
+output:
+  schema:
+    type: object
+    properties:
+      explanation: {type: string, description: 拆字讲解正文}
+      positions: {type: array, description: 逐位键与字根断言}
+      suggestions: {type: array}
+      error: {type: string, description: 失败原因，成功时不存在}
+      self_check: {type: object, description: 自校验结果}
+      model: {type: string}
+  display:
+    primary: explanation
+    secondary: [positions, model]

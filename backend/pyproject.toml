@@ -21,6 +21,8 @@ dependencies = [
     "structlog>=24.4.0",
     "apscheduler>=3.10.0",
     "cryptography>=42.0.0",
+    # agent 契约声明（agent.yaml / manifest.json）解析用；原本已是 langchain/uvicorn 的传递依赖
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -33,8 +35,15 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# 全局 async engine（app/db.py）的连接池必须与测试共用同一个事件循环，
+# 否则每个用例换 loop 会让 teardown 撞上 "Event loop is closed"。
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "no_db: 纯函数测试，不需要数据库（跳过 autouse 的 DB 清理 fixture）",
+]
 
 [tool.ruff]
 line-length = 100

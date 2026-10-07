@@ -55,7 +55,12 @@ async def logged_in_client() -> AsyncClient:
 
 
 @pytest.fixture(autouse=True)
-async def cleanup_generated_rows():
+async def cleanup_generated_rows(request):
+    # 纯函数测试（如 app/contract.py 的解析器）不碰数据库：
+    # 跳过清理，既省掉每个用例建连接的开销，也避开 async fixture 的 loop teardown 噪音。
+    if request.node.get_closest_marker("no_db"):
+        yield
+        return
     yield
     async with AsyncSessionLocal() as session:
         await session.execute(

@@ -12,6 +12,50 @@ export type Agent = {
   active_version: string | null;
 };
 
+/**
+ * Agent 契约（agent 包里的 agent.yaml / manifest.json 经平台解析后的结果）。
+ * 未声明该文件的版本为 null —— 此时 Try Run 只有 JSON 模式，行为与历史版本一致。
+ */
+export type ContractPropertyType =
+  | "object"
+  | "array"
+  | "string"
+  | "number"
+  | "integer"
+  | "boolean";
+
+export type ContractProperty = {
+  type?: ContractPropertyType;
+  title?: string;
+  description?: string;
+  default?: unknown;
+  enum?: unknown[];
+  format?: string;
+  properties?: Record<string, ContractProperty>;
+  required?: string[];
+  items?: ContractProperty;
+  [key: string]: unknown;
+};
+
+export type ContractExample = {
+  name?: string;
+  value: Record<string, unknown>;
+};
+
+export type AgentContract = {
+  api_version?: number;
+  name?: string;
+  description?: string;
+  input?: {
+    schema?: ContractProperty;
+    examples?: ContractExample[];
+  };
+  output?: {
+    schema?: ContractProperty;
+    display?: { primary?: string; secondary?: string[] };
+  };
+};
+
 export type AgentVersion = {
   id: string;
   version: string;
@@ -20,6 +64,7 @@ export type AgentVersion = {
   is_active: boolean;
   status: string;
   created_at: string;
+  contract?: AgentContract | null;
 };
 
 export type ApiKey = {

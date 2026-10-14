@@ -48,8 +48,8 @@ LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
 
 # 一次调用中最多 2 次 LLM 尝试（含首次），避免级联延迟
 MAX_LLM_CALLS = 2
-# 单次 agent 调用总超时，必须在平台 invoke_sync_timeout 之内（默认 300s）
-TOTAL_TIMEOUT = int(os.environ.get("AGENT_TOTAL_TIMEOUT", "240"))
+# 单次 agent 调用总超时，必须 < 平台 invoke_sync_timeout（默认 180s），留余量取 170
+TOTAL_TIMEOUT = int(os.environ.get("AGENT_TOTAL_TIMEOUT", "170"))
 
 VALID_TASKS = {"translate", "polish", "context"}
 

@@ -8,20 +8,44 @@ diff-explainer Agent — AI 差异解释 Agent
 入口函数 `invoke(input, config)`：
 - 默认返回 dict（非流式）
 - 如果 config["stream"] = True，返回 generator 逐 token 输出
+
+工程模式复用 json-repairer / translate-agent：
+- _build_llm()：max_retries=0 + timeout，禁用 SDK 内部重试
+- TOTAL_TIMEOUT + _check_timeout(stage)：agent 总超时守护
+- MAX_LLM_CALLS：LLM 调用失败重试
+- _normalize_llm_output()：剥离 markdown fence
+- 流式：config["stream"] 为 True 时逐 token yield {"token": ...}
 """
 import json
+import logging
 import os
+import time
 
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
 
-# --- LLM 初始化 ---
-_llm = ChatOpenAI(
-    model=os.getenv("LLM_MODEL") or os.getenv("DASHSCOPE_MODEL", "qwen-plus"),
-    temperature=float(os.getenv("LLM_TEMPERATURE", os.getenv("DASHSCOPE_TEMPERATURE", "0.0"))),
-    max_tokens=int(os.getenv("LLM_MAX_TOKENS", os.getenv("DASHSCOPE_MAX_TOKENS", "4096"))),
-    api_key=os.getenv("LLM_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or "sk-placeholder",
-    base_url=os.getenv("LLM_BASE_URL") or os.getenv("DASHSCOPE_BASE_URL"),
+logger = logging.getLogger("diff-explainer")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
+
+MODEL = os.environ.get("LLM_MODEL", os.environ.get("DASHSCOPE_MODEL", "qwen-plus"))
+API_KEY = os.environ.get("LLM_API_KEY", os.environ.get("DASHSCOPE_API_KEY", ""))
+BASE_URL = os.environ.get("LLM_BASE_URL", os.environ.get("DASHSCOPE_BASE_URL", ""))
+TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", os.environ.get("DASHSCOPE_TEMPERATURE", "0.0")))
+MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", os.environ.get("DASHSCOPE_MAX_TOKENS", "4096")))
+LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
+
+# 一次调用中最多 2 次 LLM 尝试（含首次），避免级联延迟
+MAX_LLM_CALLS = 2
+# 单次 agent 调用总超时，必须 < 平台 invoke_sync_timeout（默认 180s），留余量取 170
+TOTAL_TIMEOUT = int(os.environ.get("AGENT_TOTAL_TIMEOUT", "170"))
+
+logger.info(
+    "Config: model=%s, base_url=%s, temp=%s, max_tokens=%s, timeout=%ss",
+    MODEL,
+    BASE_URL[:30] if BASE_URL else "(empty)",
+    TEMPERATURE,
+    MAX_TOKENS,
+    LLM_TIMEOUT,
 )
 
 # --- 语言特定提示词模板 ---
@@ -77,6 +101,21 @@ EXPLAIN_SYSTEM = """你是一个专业的代码差异解释助手。用户选中
 4. 使用中文回答"""
 
 
+def _build_llm() -> ChatOpenAI:
+    """构建 LLM 实例。max_retries=0 禁用 SDK 内部重试，agent 自己重试。"""
+    kwargs = dict(
+        model=MODEL,
+        temperature=TEMPERATURE,
+        max_tokens=MAX_TOKENS,
+        api_key=API_KEY or "sk-placeholder",
+        timeout=LLM_TIMEOUT,
+        max_retries=0,
+    )
+    if BASE_URL:
+        kwargs["base_url"] = BASE_URL
+    return ChatOpenAI(**kwargs)
+
+
 def _build_human_prompt(input_data: dict, mode: str) -> str:
     """根据模式和输入数据构建用户提示词。"""
 
@@ -120,7 +159,7 @@ def _build_human_prompt(input_data: dict, mode: str) -> str:
         parts.append(f"[选中差异]\n{diff_content[:4000]}")
 
         if context_after:
-            parts.append(f"[后文上下文]\n{context_after[:1000:]}")
+            parts.append(f"[后文上下文]\n{context_after[:1000]}")
 
         return "\n\n".join(parts)
 
@@ -143,8 +182,58 @@ def _truncate_hunks(hunks: list, max_chars: int = 8000) -> str:
     return "\n\n".join(result)
 
 
-def invoke(input: dict, config: dict):
-    """Miao agent 入口。
+def _normalize_llm_output(text: str) -> str:
+    """安全剥离 markdown code fence。"""
+    if not text.startswith("```"):
+        return text
+    lines = text.split("\n")
+    result_lines = lines[1:]
+    while result_lines and result_lines[-1].strip() in ("```", "``"):
+        result_lines.pop()
+    return "\n".join(result_lines).strip()
+
+
+def _try_parse_json(content: str):
+    """尝试从 AI 响应中解析 JSON。"""
+    try:
+        return json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def _call_llm(llm: ChatOpenAI, system_prompt: str, user_content: str) -> str:
+    """调用 LLM 并标准化输出，带一次重试（复用 MAX_LLM_CALLS 模式）。"""
+    last_err: Exception | None = None
+    for attempt in range(MAX_LLM_CALLS):
+        try:
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_content),
+            ]
+            response = llm.invoke(messages)
+            out = _normalize_llm_output(response.content)
+            if out:
+                return out
+            last_err = ValueError("LLM 返回空响应")
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            logger.warning("LLM call attempt %d failed: %s", attempt + 1, e)
+    raise ValueError(f"LLM 调用失败（{MAX_LLM_CALLS} 次尝试）：{last_err}")
+
+
+def _stream_llm(llm: ChatOpenAI, system_prompt: str, user_content: str):
+    """流式调用 LLM，逐 token yield {"token": ...}。"""
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_content),
+    ]
+    for chunk in llm.stream(messages):
+        if chunk.content:
+            yield {"token": chunk.content}
+
+
+def invoke(input: dict, config: dict = None):
+    """Miao agent 标准入口。
 
     Args:
         input: 调用方传入的 dict，包含：
@@ -154,58 +243,44 @@ def invoke(input: dict, config: dict):
             - hunks: 差异块列表（summary 模式）
             - selected_hunks: 选中的差异块（explain_selection 模式）
             - context_before/context_after: 上下文（explain_selection 模式，可选）
-        config: 运行时 config
+        config: 运行时 config（config["stream"]=True 时走流式）
 
     Returns:
         dict 或 generator
     """
+    config = config or {}
     mode = input.get("mode", "summary")
-    human_prompt = _build_human_prompt(input, mode)
+    if mode not in ("summary", "explain_selection"):
+        mode = "summary"
 
+    human_prompt = _build_human_prompt(input, mode)
     system_prompt = SUMMARY_SYSTEM if mode == "summary" else EXPLAIN_SYSTEM
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "{input}"),
-    ])
-    chain = prompt | _llm
+    llm = _build_llm()
 
     # 流式模式
     if config.get("stream"):
-        def _stream():
-            for chunk in chain.stream({"input": human_prompt}):
-                if chunk.content:
-                    yield {"token": chunk.content}
-        return _stream()
+        return _stream_llm(llm, system_prompt, human_prompt)
 
-    # 非流式模式
-    response = chain.invoke({"input": human_prompt})
-    content = response.content
+    # 非流式模式：超时守护
+    t0 = time.time()
 
-    # 尝试解析为 JSON（AI 可能返回 markdown 包裹的 JSON）
+    def _check_timeout(stage: str) -> None:
+        if time.time() - t0 > TOTAL_TIMEOUT:
+            raise TimeoutError(f"Agent 总超时（{TOTAL_TIMEOUT}s），阶段：{stage}")
+
+    _check_timeout("llm")
+    content = _call_llm(llm, system_prompt, human_prompt)
+    _check_timeout("parse")
     parsed = _try_parse_json(content)
 
-    return {
+    result = {
         "mode": mode,
         "analysis": parsed if parsed else content,
-        "model": os.getenv("LLM_MODEL") or os.getenv("DASHSCOPE_MODEL", "qwen-plus"),
+        "model": MODEL,
     }
-
-
-def _try_parse_json(content: str):
-    """尝试从 AI 响应中解析 JSON，处理 markdown 代码块包裹。"""
-    # 去掉 markdown 代码块标记
-    text = content.strip()
-    if text.startswith("```"):
-        # 去掉首行 ```json 和末行 ```
-        lines = text.split("\n")
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines)
-
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return None
+    # 顶层 answer 便于前端 Try Run（普通模式取 output.answer）直接展示；
+    # 流式模式仍逐 token 输出，不受影响。analysis 字段保留向后兼容。
+    result["answer"] = result["analysis"]
+    logger.info("Invoke done: mode=%s %.2fs", mode, time.time() - t0)
+    return result

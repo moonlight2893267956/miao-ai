@@ -32,8 +32,8 @@ MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", os.environ.get("DASHSCOPE_MAX_
 LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
 # 一次调用中最多允许 2 次 LLM 重试（含首次），避免级联延迟
 MAX_LLM_CALLS = 2
-# 单次 agent 调用的总超时，必须在平台 invoke_sync_timeout 之内（默认 300s）
-TOTAL_TIMEOUT = int(os.environ.get("AGENT_TOTAL_TIMEOUT", "240"))
+# 单次 agent 调用的总超时，必须 < 平台 invoke_sync_timeout（默认 180s），留余量取 170
+TOTAL_TIMEOUT = int(os.environ.get("AGENT_TOTAL_TIMEOUT", "170"))
 
 logger.info(f"Config: model={MODEL}, base_url={BASE_URL[:30] if BASE_URL else '(empty)'}, "
             f"temp={TEMPERATURE}, max_tokens={MAX_TOKENS}, timeout={LLM_TIMEOUT}s")

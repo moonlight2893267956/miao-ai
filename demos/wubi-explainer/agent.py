@@ -1,408 +1,296 @@
+#!/usr/bin/env python3
 """
-wubi-explainer —— 五笔拆字解释 agent
+五笔拆字解释 agent（平台入口：agent:invoke）。
 
-职责：给定一个汉字的编码与**逐位候选字根**，解释「这个字为什么这么拆」。
+定位变更（相对早期版本）
+------------------------
+旧版是「候选集抽取器」：调用方给 code 和每位候选，agent 只能在候选里挑。
+于是错了既发现不了、也纠正不了；而它为了把话讲圆，会编造事实上不存在的信息
+（最典型的是在没有笔顺数据时断言"首笔为竖"），自校验还只查结构、查不出这类错。
 
-── 设计红线：只讲已知事实，不产生事实 ──
+新版是「决策者」：
+  1. 事实采集：内置码表 + Tavily 联网字典，多源并列，分歧原样上报（wubi/facts.py）
+  2. 决策    ：编码由事实定；模型只挑字根并给**字形**上的理由（wubi/decide.py）
+  3. 校验    ：纯规则校验 + 可解释置信度，模型不得覆盖权威事实（wubi/verify.py）
+  4. 组句    ：讲解由服务端拼装，模型不碰整段散文（wubi/compose.py）
+  5. 追问    ：同一会话内的后续提问 —— 历史当事实块交给模型回答，引用可核对
+               （wubi/followup.py 编排 + wubi/answer.py 提示与校验）
 
-调用方（五笔练习室）会把算法已经算出的东西全部送进来：编码、每一位对应哪个键、
-该键上有哪些候选字根、已有的标注、以及用户这次按错了哪个键。
-因此本 agent 的**发挥空间被限制在候选集内** —— 它无法说出一个不在该键上的字根。
+词级（词组）模式
+----------------
+输入带 ``task=explain-phrase``（或锚点是词组、逐位材料带 ``fromChar``）时走
+``wubi/phrase.py``：事实**全部由调用方给全** —— 取码规则（每字取几码）、每一位
+取自哪个字的第几码、该位的候选字根。agent 不重新推导取码规则，模型只做
+「从候选里挑字根 + 说字形理由」，来源与规则由服务端写进讲解。
+校验四条：编码未被改写、位数一致、键位与来源字一致、字根落在该位候选内。
 
-请特别注意：不要试图「自己查五笔码表」或「凭记忆拆分」。编码是权威（由调用方给定），
-agent 的活儿是**在给定候选里挑出最合理的那一个，并说明理由**。
+多轮会话（平台侧）
+------------------
+平台把本会话既往轮次的 input/output 注回 ``config["conversation"]``，
+agent 自身仍然无状态。两种用法：
 
-── 返回值 ──
+  * 追问轮（input 带 ``question``，且没有重新给 code+positions）
+    → wubi/followup.py：**每一轮都推理**，但输入受控 ——
+      历史里的编码/字根/理由作为「已核实事实块」注入，模型必须为每句陈述给出
+      可核对的引用（citations，指不到真实字段就打回重试），
+      需要新判断的内容单独放 new_claims 并标注「未经交叉核验」；
+      「用户纠正某一位」是否在候选集内**由代码核对后告知模型**（日/曰 这类形近
+      字根模型会看串），落在候选内的纠正必须落到 position_revisions。
+      模型不可用（没 key / 调用失败）时降级为基于历史的确定性回答，并在讲解里说明。
+  * 完整拆字轮（给了 char+code/positions）
+    → 走正常流程；此时若也带了 ``question``，把它作为背景说明喂给决策层，
+      不去猜「用户在问哪一位」。
 
-同步返回 dict（不返回 generator）：
-    {
-      "explanation": "……",
-      "positions": [{"key": "j", "radical": "日"}, ...],   # 位数必须与编码一致
-      "suggestions": ["……"],
-      "model": "qwen-plus",
-      "self_check": {"ok": true, "attempts": 1, "violations": []}
-    }
+流式（config["stream"]）
+------------------------
+``invoke`` 在 ``config["stream"]`` 为真时返回 generator：先按块吐正文（前端打字机），
+最后 ``yield {"output": result}`` 给出结构化结果（平台随 done 事件记录该轮 output）。
+非流式时返回完整 dict，行为与以前完全一致。
 
-调用方会**再校验一遍** `positions` 是否落在候选集内；这里先自校验并重试一次，
-是为了把「能通过校验的完整断言」的比例提上去 —— 校验不过的会被前端退回确定性视图。
-
-── 打包说明 ──
-
-单文件打包，兼容平台 Docker 构建（仅 COPY agent.py，不会带入子目录）。
-不要拆子模块，也不要写 fastapi/uvicorn/pydantic/langfuse 到 requirements.txt（平台已装）。
+!! 绝不向外抛异常 !!
+抛出会被平台变成 500/502，调用方只看到「服务异常」，拿不到任何可解释信息。
+所有失败路径都归一成 output 里的一个 dict（含 error 字段）。
 """
+from __future__ import annotations
 
-import json
-import logging
 import os
-import re
+import sys
 import time
-from typing import Any
 
-logger = logging.getLogger("wubi-explainer")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
+# 保证无论以哪种方式启动（docker / venv / 直接 python）都能 import 到同目录的 wubi 包
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-MODEL = os.environ.get("LLM_MODEL") or os.environ.get("DASHSCOPE_MODEL") or "qwen-plus"
-API_KEY = os.environ.get("LLM_API_KEY") or os.environ.get("DASHSCOPE_API_KEY") or ""
-BASE_URL = os.environ.get("LLM_BASE_URL") or os.environ.get("DASHSCOPE_BASE_URL") or ""
-# !! 温度强制为 0，**刻意不采用注入值** !!
-#
-# 这个任务是结构化抽取：答案必须逐位落在给定的候选字根里，输出格式也必须严格。
-# 而平台实测注入的是 0.7 —— 那恰恰是这类任务最不需要的东西（更容易编字根、更容易
-# 破格式），模型的自由发挥对「答案对不对」毫无帮助，只会推高自校验的失败率。
-# 文风的收益远小于「断言不可校验」的代价，所以这里硬编码。
-TEMPERATURE = 0.0
-MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS") or os.environ.get("DASHSCOPE_MAX_TOKENS") or "2048")
-# 平台同步调用超时 180s，这里留出余量；两次尝试共享这个预算
-LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "70"))
-TOTAL_BUDGET_SEC = int(os.environ.get("WUBI_TOTAL_BUDGET", "170"))
+from wubi import compose, decide, followup, llm, phrase, tables, verify  # noqa: E402
+from wubi import facts as facts_mod  # noqa: E402
 
-SYSTEM_PROMPT = """你是五笔字型（86 版）的拆字讲解老师。
+# 两次尝试之间共享的预算：超了就带着已有信息返回，而不是让平台 180s 超时后给一个空错误
+TOTAL_BUDGET_SEC = int(os.environ.get("WUBI_TOTAL_BUDGET", "120"))
+MAX_ATTEMPTS = int(os.environ.get("WUBI_MAX_ATTEMPTS", "2"))
 
-你会收到一个汉字的**完整编码**，以及**每一个码位对应的键位上全部候选字根**。
-
-硬性约束（违反即为错误）：
-1. 编码是权威，**不得改写**任何一位的键位。
-2. 每一位的字根**只能从该位给出的候选字根里挑**，不许出现候选之外的任何字形。
-3. `positions` 必须**给全每一位**（编码有几位就给几项），不允许因为不确定就缺项。
-4. 只输出 JSON，不要任何解释性前后缀、不要 Markdown 代码围栏。
-
-讲解要点（用中文，3~5 句，面向正在学五笔的人）：
-- 先说这个字拆成了哪几个字根，按码位顺序。
-- 再说明**怎么在候选里排除其他可能**（例如「日」与「曰」的区别、字形哪一块对上了）。
-- 若给了「用户这次的错误」（期望键 → 实际键），**指名点出**这两个键上的字根为何容易混。
-- 若标注里提到识别码 / 简码 / 键名字 / 成字字根，用一句话说明它对编码的影响。
-
-输出 JSON 结构（**字段名必须逐字照抄**，尤其 positions 里是 key 与 radical 两个键）：
-{
-  "explanation": "「照」拆成 日 + 刀 + 口 + 灬。第一位取「日」而不是同键的「曰」，因为字形里是窄长的日……",
-  "positions": [
-    {"key": "j", "radical": "日"},
-    {"key": "v", "radical": "刀"},
-    {"key": "k", "radical": "口"},
-    {"key": "o", "radical": "灬"}
-  ],
-  "suggestions": ["注意「日」与「曰」的区别：日窄曰宽"]
-}
-
-注意上面例子的几个要点（最常见的错法都在这）：
-- positions 是**数组**，不是对象；每一项是 {"key": "...", "radical": "..."}，
-  不要写成 "glyph" / "radicalGlyph" / "字根" 之类别的名字。
-- key 是**小写字母**（就是编码那一位），radical 是**该位选中的字根字形**。
-- positions 的**项数必须等于编码位数**，顺序与编码一致。"""
-
-
-def _build_llm():
-    """构造模型客户端。
-
-    关闭 SDK 自带重试（max_retries=0）：重试由本文件控制，避免一次请求内部静默
-    重试多次把平台 180s 超时吃光，最后连错误都来不及返回。
-
-    !! langchain 在这里才 import（延迟导入）!!
-    写在文件顶部的话，依赖没装好会在 import 期直接崩 —— 平台看到的是
-    「进程起不来 / crashed」，健康检查失败，**任何有信息的错误都传不出来**。
-    延迟导入后，同样的问题会变成一次正常的返回：{"error": "模型初始化失败：No module named …"}，
-    在平台的 Try Run 里一眼可见。
-    """
-    from langchain_openai import ChatOpenAI
-
-    kwargs: dict[str, Any] = dict(
-        model=MODEL,
-        temperature=TEMPERATURE,
-        max_tokens=MAX_TOKENS,
-        api_key=API_KEY or "sk-placeholder",
-        timeout=LLM_TIMEOUT,
-        max_retries=0,
-    )
-    if BASE_URL:
-        kwargs["base_url"] = BASE_URL
-    return ChatOpenAI(**kwargs)
-
-
-def _strip_fence(text: str) -> str:
-    """去掉模型习惯性加的 Markdown 代码围栏。"""
-    t = (text or "").strip()
-    if not t.startswith("```"):
-        return t
-    lines = t.split("\n")[1:]
-    while lines and lines[-1].strip() in ("```", "``"):
-        lines.pop()
-    return "\n".join(lines).strip()
-
-
-def _extract_json(text: str) -> dict | None:
-    """从模型输出里取出 JSON 对象；取不到返回 None。"""
-    cleaned = _strip_fence(text)
-    try:
-        obj = json.loads(cleaned)
-        return obj if isinstance(obj, dict) else None
-    except json.JSONDecodeError:
-        pass
-
-    # 兜底：截取第一个 { 到最后一个 } —— 模型偶尔会在 JSON 前后加一句话
-    start, end = cleaned.find("{"), cleaned.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            obj = json.loads(cleaned[start : end + 1])
-            return obj if isinstance(obj, dict) else None
-        except json.JSONDecodeError:
-            return None
-    return None
-
-
-# ─── 输入校验 ──────────────────────────────────────────────
+# 流式模式：正文按块吐（打字机效果）。默认 ≈200 字/秒，300 字的讲解约 1.5s 吐完
+# （太快就看不出在打字了）；嫌慢可调 WUBI_STREAM_DELAY。
+STREAM_CHUNK = max(1, int(os.environ.get("WUBI_STREAM_CHUNK", "6")))
+STREAM_DELAY = float(os.environ.get("WUBI_STREAM_DELAY", "0.03"))
 
 
 class BadInput(Exception):
-    """输入不合法：这类错误是调用方的问题，直接如实回报，不要试图猜。"""
+    """输入不合法：这类错误是调用方的问题，如实回报，不要试图猜。"""
 
 
-ZONE_KEYS = set("qwertyuiopasdfghjklzxcvbnm")
-
-
-def _parse_input(input: dict) -> dict:
+def _parse_input(input: dict):
+    input = input if isinstance(input, dict) else {}
     char = input.get("char")
-    code = input.get("code")
-    raw_positions = input.get("positions")
-
-    if not isinstance(char, str) or not char:
+    if not isinstance(char, str) or not char.strip():
         raise BadInput("缺少 char")
-    if not isinstance(code, str) or not code:
-        raise BadInput("缺少 code")
-    if not re.fullmatch(r"[a-z]+", code):
-        raise BadInput(f"code 必须是纯小写字母，收到 {code!r}")
-    if not isinstance(raw_positions, list) or len(raw_positions) != len(code):
-        raise BadInput(f"positions 位数必须与编码一致（编码 {len(code)} 位）")
-
-    positions = []
-    for i, item in enumerate(raw_positions):
-        if not isinstance(item, dict):
-            raise BadInput(f"positions[{i}] 不是对象")
-        key = item.get("key")
-        if key != code[i]:
-            raise BadInput(f"positions[{i}].key（{key!r}）与编码第 {i + 1} 位（{code[i]!r}）不一致")
-        candidates = item.get("candidates") or []
-        glyphs = [c.get("glyph") for c in candidates if isinstance(c, dict) and c.get("glyph")]
-        positions.append({"index": i, "key": key, "role": item.get("role"), "glyphs": glyphs})
+    char = char.strip()
+    if len(char) != 1:
+        raise BadInput("char 必须是单个汉字")
 
     notes = input.get("notes") or []
+    if not isinstance(notes, list):
+        notes = []
     error = input.get("error") or None
-    if error is not None and not (isinstance(error, dict) and error.get("expected") and error.get("actual")):
+    if not (isinstance(error, dict) and error.get("expected") and error.get("actual")):
         error = None
 
-    return {"char": char, "code": code, "positions": positions, "notes": notes, "error": error}
+    online = input.get("online", True)
+    hints = {
+        "code": input.get("code"),
+        "notes": notes,
+        "error": error,
+        "allow_online": bool(online),
+        # 调用方的逐位候选（agent.yaml 契约：给了就「只能从这里挑」）。
+        # 只保留 dict 形状的项，传给事实层做权威候选，别在 collect 里被本地推导扩大。
+        "positions": [p for p in (input.get("positions") or []) if isinstance(p, dict)],
+    }
+
+    # certain：调用方已经算出来的确定字根（成字字根/键名字），直接强制采纳
+    certain = {}
+    code = hints.get("code") or ""
+    for p in input.get("positions") or []:
+        if not isinstance(p, dict) or not p.get("certain"):
+            continue
+        idx = p.get("index")
+        if idx is None and p.get("key") and code:
+            found = code.find(p["key"])
+            idx = found if found >= 0 else None
+        if idx is not None:
+            certain[str(idx)] = p["certain"]
+
+    return char, hints, certain
 
 
-def _build_user_prompt(data: dict, rejection: str | None = None) -> str:
-    lines = [f"汉字：{data['char']}", f"完整编码：{data['code']}", ""]
-
-    lines.append("逐位候选（每一位只能从这里挑）：")
-    for pos in data["positions"]:
-        role = f"（{pos['role']}）" if pos["role"] else ""
-        if pos["glyphs"]:
-            shown = " / ".join(pos["glyphs"])
-        else:
-            shown = "（补位键，该键不代表任何字根，本项不要给字根）"
-        lines.append(f"  第 {pos['index'] + 1} 位  键 {pos['key']}  {role}候选：{shown}")
-
-    if data["notes"]:
-        lines.append("")
-        lines.append("已知标注：")
-        for note in data["notes"]:
-            if isinstance(note, dict) and note.get("message"):
-                lines.append(f"  - {note['message']}")
-
-    if data["error"]:
-        lines.append("")
-        lines.append(
-            f"用户这次的错误：期望按 {data['error']['expected']} 键，实际按了 {data['error']['actual']} 键。"
-            "请在讲解里指名点出这两个键上的字根为何容易混。"
-        )
-
-    if rejection:
-        lines.append("")
-        lines.append("上一次的回答没有通过校验，问题如下，请重新给出完整且合规的 JSON：")
-        lines.append(f"  {rejection}")
-
-    return "\n".join(lines)
-
-
-# ─── 自校验（与调用方同一套判定口径） ──────────────────────
-
-
-def _self_check(payload: dict, data: dict) -> tuple[bool, str]:
-    """校验模型的结构化断言是否落在候选集内。
-
-    与前端 validateExplainResult 保持同一口径：位数一致、键位一致、字根在候选内。
-    """
-    positions = payload.get("positions")
-    if not isinstance(positions, list) or not positions:
-        return False, "缺少 positions 结构化断言"
-
-    if len(positions) != len(data["positions"]):
-        return False, f"positions 位数不符：编码 {len(data['positions'])} 位，给出 {len(positions)} 位"
-
-    for i, item in enumerate(positions):
-        expected = data["positions"][i]
-        if not isinstance(item, dict):
-            return False, f"positions[{i}] 不是对象"
-
-        if item.get("key") != expected["key"]:
-            return False, f"第 {i + 1} 位键位不符：应为 {expected['key']}，给出 {item.get('key')}"
-
-        allowed = expected["glyphs"]
-        if not allowed:
-            return False, f"第 {i + 1} 位是补位键，不应给出字根，却给了「{item.get('radical')}」"
-
-        if item.get("radical") not in allowed:
-            return False, (
-                f"第 {i + 1} 位字根「{item.get('radical')}」不在 {expected['key']} 键的候选里"
-                f"（{'/'.join(allowed)}）"
-            )
-
-    return True, ""
-
-
-def _normalize_positions(payload: dict) -> list[dict]:
+def _sources_digest(facts: dict) -> list:
     out = []
-    for item in payload.get("positions") or []:
-        if isinstance(item, dict):
-            out.append({"key": item.get("key"), "radical": item.get("radical")})
+    for name, f in (facts.get("facts") or {}).items():
+        if f.get("ok") and f.get("code"):
+            out.append({"source": name, "code": f["code"], "detail": f.get("source", "")})
+        else:
+            out.append({"source": name, "code": None, "detail": f.get("error", "")})
     return out
 
 
-def _is_timeout(exc: Exception) -> bool:
-    """判断是否是「超时」类错误。
+def _fail(char: str, error: str, attempts: int = 0, violations=None) -> dict:
+    return {
+        "char": char,
+        "code": None,
+        "code_source": "none",
+        "positions": None,
+        "explanation": None,
+        "suggestions": [],
+        "confidence": 0.0,
+        "conflicts": [],
+        "sources": [],
+        "error": error,
+        "self_check": {"ok": False, "attempts": attempts, "violations": violations or []},
+        "model": llm.MODEL,
+    }
 
-    刻意按**类名**判断，而不是 import openai / langchain 的异常类：
-    那些依赖是延迟导入的，在错误处理路径上再触发一次导入失败，就成了「报错时报错」。
-    langchain 的 OpenAITimeoutError 与 openai 的 APITimeoutError 类名都含 Timeout。
+
+def _stream_pieces(text: str):
+    """按固定块长把正文吐出去（打字机效果），块间留一点间隔。"""
+    for start in range(0, len(text), STREAM_CHUNK):
+        yield {"token": text[start:start + STREAM_CHUNK]}
+        if STREAM_DELAY > 0:
+            time.sleep(STREAM_DELAY)
+
+
+def _stream_result(result: dict):
+    """把完整结果包成 generator（``config["stream"]`` 为真时返回它）。
+
+    约定见 backend/agent_templates/miao_runner.py 的流式说明：
+      * 逐段 ``{"token": ...}`` = 正文，前端据此做打字机；
+      * 最后 ``{"output": result}`` = 结构化结果，runner 不当 token 转发，而是随
+        ``event: done`` 下发；平台据此记录本轮 output —— 这样**流式轮次也能作为
+        下一轮追问的上下文**（否则历史里 output 为空，追问会失去依据）。
     """
-    return "timeout" in type(exc).__name__.lower()
+
+    def _gen():
+        text = result.get("explanation") or result.get("error") or ""
+        yield from _stream_pieces(text)
+        yield {"output": result}
+
+    return _gen()
 
 
-def _model_info() -> dict:
-    """出错时回报「用的是哪个模型、哪个端点」。
-
-    排障时第一个要知道的就是这个：拿到 401 却不知道是哪家 key 的问题，只能挨个猜。
-    base_url 不敏感（就是服务地址）；**api_key 永远不回报，连前缀都不给**。
-    """
-    return {"model": MODEL, "base_url": BASE_URL or None}
-
-
-def _call_llm(llm: Any, user_prompt: str) -> str:
-    """单轮调用模型。
-
-    注：不写 `llm: ChatOpenAI` —— 注解在 def 期求值，而 ChatOpenAI 是延迟导入的，
-    写类型名会在**导入期**直接 NameError（比依赖缺失更难查：连错误返回都到不了）。
-    """
-    from langchain_core.messages import HumanMessage, SystemMessage
-
-    resp = llm.invoke([
-        SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content=user_prompt),
-    ])
-    return resp.content or ""
+def invoke(input: dict, config: dict = None):
+    """平台入口：``config["stream"]`` 为真时返回 generator，否则返回完整 dict。"""
+    result = _dispatch(input, config)
+    if isinstance(result, dict) and (config or {}).get("stream"):
+        return _stream_result(result)
+    return result
 
 
-# ─── 入口 ──────────────────────────────────────────────────
-
-
-def invoke(input: dict, config: dict = None) -> dict:
-    """平台入口：`agent:invoke`。
-
-    !! 绝不向外抛异常 !!
-    抛出会被平台变成 500/502，前端只看到「服务异常」，拿不到任何可解释的信息。
-    所有失败路径都归一成 output 里的一个 dict（含 error 字段）。
-    """
-    config = config or {}
+def _dispatch(input: dict, config: dict = None) -> dict:
+    """真正的逻辑：事实采集 → 决策 → 校验 → 组句（或追问）。"""
     started = time.time()
+    input = input if isinstance(input, dict) else {}
+    question = input.get("question")
+    question = question.strip() if isinstance(question, str) else ""
+
+    # ── 0. 追问轮：带 question 且没有重新给完整材料 ──
+    # 结论与候选集已经在上一轮落库并注回 config.conversation，这里确定性作答。
+    if question and not (input.get("code") and input.get("positions")):
+        conversation = (config or {}).get("conversation") or {}
+        return followup.handle(
+            char=(input.get("char") or "").strip(),
+            question=question,
+            turns=conversation.get("turns") or [],
+            started=started,
+        )
+
+    # ── 0.5 词级（词组）轮：事实由调用方给全（规则 + 逐位来源 + 候选） ──
+    # 必须排在单字解析之前：`_parse_input` 会按「单个汉字」拒掉词组。
+    # 词组追问轮不带 code/positions，已经在上面的追问分支处理掉了。
+    if phrase.is_phrase_input(input):
+        return phrase.run(input, started)
 
     try:
-        data = _parse_input(input or {})
+        char, hints, certain = _parse_input(input)
     except BadInput as exc:
-        logger.warning("bad input: %s", exc)
-        return {"error": f"输入不合法：{exc}", "explanation": None, "positions": None}
+        return _fail("", "输入不合法：%s" % exc)
 
-    if not API_KEY:
-        logger.error("LLM_API_KEY / DASHSCOPE_API_KEY 未注入")
-        return {"error": "模型未配置（缺少 LLM_API_KEY）", "explanation": None, "positions": None}
+    # 完整材料 + 追问文本：把问题当背景交给决策层（不要猜用户在问哪一位）
+    if question:
+        hints["notes"] = list(hints.get("notes") or []) + [
+            {"message": f"调用方追问：{question}"}
+        ]
+
+    # ── 1. 事实采集（离线码表 + 联网核验；失败自动降级，永不抛出） ──
+    # caller_positions：调用方给的逐位候选是权威清单（agent.yaml 契约），
+    # 不带它才退回「字根表 ∪ 变形归并的 IDS 部件」。
+    try:
+        facts = facts_mod.collect(
+            char, caller_code=hints.get("code"), allow_online=hints["allow_online"],
+            caller_positions=hints.get("positions"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _fail(char, "事实采集失败：%s: %s" % (type(exc).__name__, str(exc)[:160]))
+
+    if not llm.API_KEY:
+        return _fail(char, "模型未配置（缺少 LLM_API_KEY）")
 
     try:
-        llm = _build_llm()
-    except Exception as exc:  # noqa: BLE001 - 构造失败也要如实回报
-        logger.exception("build llm failed")
-        return {"error": f"模型初始化失败：{exc}", "explanation": None, "positions": None}
+        client = llm.build_client()
+    except Exception as exc:  # noqa: BLE001
+        return _fail(char, "模型初始化失败：%s: %s" % (type(exc).__name__, str(exc)[:160]))
 
-    rejection: str | None = None
-    violations: list[str] = []
+    # ── 2. 决策（最多两次，失败把原因喂回去重试） ──
+    prompt = decide.build_user_prompt(char, facts, hints)
+    result = None
     attempts = 0
+    rejection = None
+    last_error = None
+    suggestions = []
 
-    # 最多两次：第一次正常提问；若自校验不过，把违规点喂回去让它改
-    for attempt in range(2):
-        attempts = attempt + 1
-
-        # 预算保护：超时就带着已有信息返回，而不是让平台 180s 超时后给用户一个空错误
+    for attempt in range(MAX_ATTEMPTS):
         if time.time() - started > TOTAL_BUDGET_SEC:
-            logger.warning("budget exhausted after %s attempts", attempts - 1)
             break
-
+        attempts = attempt + 1
+        p = prompt if rejection is None else decide.add_rejection(prompt, rejection)
         try:
-            raw = _call_llm(llm, _build_user_prompt(data, rejection))
+            raw = llm.call(client, decide.SYSTEM_PROMPT, p)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("llm call failed (attempt %s)", attempts)
-
-            # !! 超时**要重试**（回退掉上一版「超时立即放弃」的做法）!!
-            #
-            # 依据是实测：这个平台最常见的超时来源是**冷启动** —— agent 刚激活 /
-            # 闲置后再调用，模型侧要预热，第一次 70s 超时，紧接着第二次十几秒就成功。
-            # 不重试等于把这种一次性失败直接变成用户可见的错误。
-            # 总时长由循环顶部的 TOTAL_BUDGET_SEC 兜住，不会无限等。
-            if _is_timeout(exc) and attempts < 2:
-                # 记进 violations：这样即使两次都超时，最终返回里的原因也是诚实的
-                # （而不是笼统的「自校验未通过」）
-                violations.append(f"第 {attempts} 次调用超时（单次上限 {LLM_TIMEOUT}s），已重试")
-                logger.info("超时（第 %s 次），按预算允许重试", attempts)
-                continue
-
-            if attempt == 0:
-                return {
-                    **_model_info(),
-                    "error": f"模型调用失败：{exc}",
-                    "explanation": None,
-                    "positions": None,
-                }
-            break
-
-        payload = _extract_json(raw)
-        if payload is None:
-            rejection = "输出不是合法 JSON"
-            violations.append(rejection)
+            last_error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+            rejection = "上一次调用失败：%s" % last_error
             continue
 
-        ok, reason = _self_check(payload, data)
-        if ok:
-            return {
-                "explanation": payload.get("explanation"),
-                "positions": _normalize_positions(payload),
-                "suggestions": payload.get("suggestions") or [],
-                "model": MODEL,
-                "char": data["char"],
-                "code": data["code"],
-                "self_check": {"ok": True, "attempts": attempts, "violations": []},
-            }
+        decision = decide.parse_decision(raw)
+        if decision is None:
+            rejection = "输出不是合法 JSON"
+            continue
 
-        rejection = reason
-        violations.append(reason)
-        logger.info("self-check failed (attempt %s): %s", attempts, reason)
+        suggestions = llm.as_suggestions(decision.get("suggestions"))
+        result = verify.validate(decision, facts, certain)
+        if result["ok"]:
+            last_error = None
+            break
+        rejection = "；".join(result["violations"]) or "自校验未通过"
 
-    # 两次都没过：把解释照常返回（前端会因校验不过而不展示），
-    # 但同时明说原因，便于从 ai_invocations 里复盘是哪一类失败。
+    if result is None or not result.get("code"):
+        return _fail(char, last_error or rejection or "无法确定该字的五笔编码", attempts)
+
+    # ── 3. 组句（服务端拼装，模型不碰整段散文） ──
+    explanation = compose.build(char, result, facts, suggestions)
+
     return {
-        "explanation": None,
-        "positions": None,
-        "suggestions": [],
-        "model": MODEL,
-        "error": "自校验未通过",
-        "self_check": {"ok": False, "attempts": attempts, "violations": violations},
+        "char": char,
+        "code": result["code"],
+        "code_source": result["code_source"],
+        "positions": result["positions"],
+        "explanation": explanation,
+        "suggestions": suggestions,
+        "confidence": result["confidence"],
+        "conflicts": result["conflicts"],
+        "sources": _sources_digest(facts),
+        "table_digest": tables.table_digest(),
+        "error": None if result["ok"] else "；".join(result["violations"]),
+        "self_check": {
+            "ok": result["ok"],
+            "attempts": attempts,
+            "violations": result["violations"],
+            "confidence": result["confidence"],
+        },
+        "model": llm.MODEL,
+        "elapsed_ms": int((time.time() - started) * 1000),
     }

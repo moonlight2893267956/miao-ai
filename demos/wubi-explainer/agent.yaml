@@ -1,31 +1,64 @@
 # wubi-explainer 的 Agent 契约声明
 #
 # 规范见 docs/agent-contract.md。平台在上传 / 激活版本时解析本文件，
-# 用于 Try Run 的表单渲染、示例填充与结构化输出展示。
+# 用于 Try Run 的表单渲染、示例填充与结构化输出展示；
+# 其中 conversation 段是**能力开关**：开启后平台才会注入会话历史。
 #
 # 注意：YAML 会把 no / yes / on / off 解析成布尔值、把 0123 解析成八进制整数，
 # 这里所有可能引起歧义的值（编码、键位）都统一加了引号。
 api_version: 1
 name: wubi-explainer
-description: 五笔拆字解释：在给定候选字根内挑选并讲清理由
+description: 五笔拆字解释：单字讲逐位字根、词组讲取码规则与逐位来源，支持同一会话内追问
 
 input:
   schema:
     type: object
-    required: [char, code, positions]
+    # 只强制要 char：追问轮只带 char + question，code / positions 从上一轮历史里取
+    required: [char]
     properties:
       char:
         type: string
-        title: 汉字
-        description: 要讲解拆分的单个汉字，例如「照」
+        title: 锚点文本
+        description: 要讲解的单个汉字（例如「照」）或词组原文（例如「编码」）
+      task:
+        type: string
+        title: 任务类型
+        description: >-
+          可选；explain-split（默认，单字拆字）或 explain-phrase（词组取码）。
+          锚点是词组、且 positions 带 fromChar 时也按 explain-phrase 处理。
+      phrase:
+        type: string
+        title: 词组原文
+        description: 可选；词级模式的词组原文（与 char 同一段文本，二者给其一即可）
+      ruleLabel:
+        type: string
+        title: 取码规则
+        description: 可选；词级模式的规则名，例如「二字词 · 每字取前 2 码」
+      derivedCode:
+        type: string
+        title: 推导编码
+        description: 可选；词级模式按规则推导的编码；与 code 不一致时讲解会如实说明以词表为准
+      matchesTable:
+        type: boolean
+        title: 推导是否与词表一致
+        description: 可选；词级模式下推导码与词表码是否一致
+      skippedChars:
+        type: array
+        title: 不取码的字
+        description: 可选；词级模式下本规则不取码的中间字
+        items: {type: string}
       code:
         type: string
         title: 五笔编码
-        description: 纯小写字母，每一位对应 positions 的一项，例如「jvko」
+        description: >-
+          纯小写字母。单字：每一位对应 positions 的一项，例如「jvko」，不填则用内置码表；
+          词组：词表收录的编码，例如「xydc」
       positions:
         type: array
         title: 逐位候选字根
-        description: 位数必须与 code 一致；第 i 项的 key 必须等于 code 的第 i 个字符
+        description: >-
+          可选；给了就按它约束每一位的字根（单字：第 i 项的 key 应等于 code 的第 i 个字符；
+          词组：每位还带来源字 fromChar，模型必须照抄）
         items:
           type: object
           required: [key, candidates]
@@ -33,6 +66,9 @@ input:
             index: {type: integer, description: 0 起的位序}
             key: {type: string, description: 该位对应的字母键}
             role: {type: string, description: 该位的组字角色，可空}
+            fromChar: {type: string, description: 词级必填：这一位取自哪个字}
+            charIndex: {type: integer, description: 词级：来源字在词组里的位置（0 起）}
+            charCodeIndex: {type: integer, description: 词级：这一位是来源字的第几码（0 起）}
             candidates:
               type: array
               description: 该键位允许的字根集合，模型只能从这里挑
@@ -42,6 +78,13 @@ input:
                 properties:
                   glyph: {type: string, description: 字根字形}
                   name: {type: string, description: 字根名称}
+      question:
+        type: string
+        title: 追问
+        description: >-
+          同一会话内的后续提问或纠正，例如「为什么第 2 位是目不是具？」「不对，第 3 位应该是土」。
+          只带 char + question 时会把上一轮结论作为「已核实事实」交给模型回答，
+          并要求给出可核对的引用（citations）；模型只允许在候选集内改动某一位。
       notes:
         type: array
         title: 已知标注
@@ -68,6 +111,38 @@ input:
           - {key: "k", candidates: [{glyph: "口", name: "口字"}]}
           - {key: "o", candidates: [{glyph: "灬", name: "四点底"}]}
         notes: []
+    - name: 词组：编码（xydc，二字词每字取前 2 码）
+      value:
+        task: "explain-phrase"
+        char: "编码"
+        phrase: "编码"
+        code: "xydc"
+        ruleLabel: "二字词 · 每字取前 2 码"
+        derivedCode: "xydc"
+        matchesTable: true
+        skippedChars: []
+        positions:
+          - {index: 0, key: "x", fromChar: "编", charIndex: 0, charCodeIndex: 0,
+             candidates: [{glyph: "纟", name: "绞丝旁"}]}
+          - {index: 1, key: "y", fromChar: "编", charIndex: 0, charCodeIndex: 1,
+             candidates: [{glyph: "丶", name: "点"}, {glyph: "亠", name: "点横头"}]}
+          - {index: 2, key: "d", fromChar: "码", charIndex: 1, charCodeIndex: 0,
+             candidates: [{glyph: "石", name: "石字旁"}]}
+          - {index: 3, key: "c", fromChar: "码", charIndex: 1, charCodeIndex: 1,
+             candidates: [{glyph: "马", name: "马字"}]}
+        notes: []
+    - name: 追问：为什么取「日」不取「曰」
+      value:
+        char: "照"
+        question: "第 1 位为什么取「日」不取「曰」？"
+    - name: 纠正：第 1 位应该是「曰」
+      value:
+        char: "照"
+        question: "不对，第 1 位应该是「曰」"
+    - name: 词组追问：为什么不取「码」的第二码
+      value:
+        char: "编码"
+        question: "为什么不取「码」的第二码？"
 
 output:
   schema:
@@ -78,7 +153,22 @@ output:
       suggestions: {type: array}
       error: {type: string, description: 失败原因，成功时不存在}
       self_check: {type: object, description: 自校验结果}
+      followup:
+        type: object
+        description: >-
+          追问轮才有：kind（reasoned/why/revise/unknown）、based_on_turn、是否降级（fallback）
+      citations:
+        type: array
+        description: 追问轮的引用出处，形如「第 1 轮 positions[0].reason」，逐条可核对
+      new_claims:
+        type: array
+        description: 追问轮里需要新判断、未经交叉核验的断言（讲解里会单独标注）
       model: {type: string}
   display:
     primary: explanation
-    secondary: [positions, model]
+    secondary: [positions, citations, model]
+
+# 多轮会话能力：开启后平台会在 config["conversation"] 里注入最近 10 轮历史
+conversation:
+  enabled: true
+  max_history_turns: 10

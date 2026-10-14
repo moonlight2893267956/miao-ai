@@ -92,6 +92,11 @@ curl -X POST http://localhost:8000/api/v1/agents/hello-agent/invoke \
     "metadata": {"user_id": "u-1", "session_id": "s-1", "tags": ["prod"]}
   }'
 # 返回 {"output": {...}, "trace_id": "abc123..."}
+# 带多轮会话时再多三个字段：
+#   conversation_id / turn / history_truncated
+# （先 POST /api/v1/agents/{name}/conversations 建会话，
+#   然后把 conversation_id 放进 metadata 一起调用；
+#   详见 docs/api-reference.md 的 Conversations 一节）
 ```
 
 ### 7. 去 Langfuse Cloud 看 trace
@@ -123,6 +128,28 @@ def invoke(input: dict, config: dict) -> dict:
 
 可选 `requirements.txt` 列依赖，平台会自动装到独立 venv。
 
+### 流式输出（SSE）
+
+`config["stream"]` 为真时，`invoke` 应**返回 generator**（返回 dict 则只有一次性输出，前端没有打字机效果）：
+
+```python
+def invoke(input, config=None):
+    if (config or {}).get("stream"):
+        def _gen():
+            for piece in stream_llm(...):        # 逐段正文
+                yield {"token": piece}
+            yield {"output": {"answer": "完整结果"}}   # 可选收尾块：结构化结果
+        return _gen()
+    return {"answer": "..."}
+```
+
+- `{"token": "..."}` → 平台转成 `event: token`，前端逐段渲染（打字机）；
+- `{"output": {...}}`（最后一个 chunk） → 不当 token 转发，而是随 `event: done` 下发，
+  平台据此记录这一轮的 output —— **多轮会话里，流式轮次必须这样给结构化结果**，
+  否则历史里这一轮没有 output，下一轮追问会失去依据；
+- 不 yield 收尾块也能跑，只是该轮在会话历史里 output 为空。
+- 约定实现见 `agent_templates/miao_runner.py` 的流式说明，`demos/` 下有可抄的样例。
+
 ## 端到端冒烟测试
 
 ```bash
@@ -147,6 +174,10 @@ bash scripts/e2e_smoke.sh
 | `/api/v1/agents/{name}/keys` | GET | - | 列出未撤销 keys |
 | `/api/v1/agents/{name}/keys/{id}` | DELETE | - | 撤销 key |
 | `/api/v1/agents/{name}/invoke` | POST | Bearer | 调用 agent |
+| `/api/v1/agents/{name}/invoke/stream` | POST | Bearer | SSE 流式调用 |
+| `/api/v1/agents/{name}/invoke/async` | POST | Bearer | 异步调用 + webhook 回调 |
+| `/api/v1/agents/{name}/conversations` | POST / GET | Bearer | 新建 / 列出多轮会话 |
+| `/api/v1/agents/{name}/conversations/{cid}` | GET / DELETE | Bearer | 会话详情（含轮次）/ 删除 |
 
 ## 配置
 

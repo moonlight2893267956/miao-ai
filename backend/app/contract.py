@@ -41,12 +41,26 @@ SUPPORTED_TYPES = frozenset(
 MAX_SCHEMA_DEPTH = 8
 
 # 顶层允许的业务字段；其余非 x- 前缀的键一律拒绝（写错字段名要立刻发现）
-_TOP_LEVEL_KEYS = ("api_version", "name", "description", "input", "output")
+_TOP_LEVEL_KEYS = (
+    "api_version",
+    "name",
+    "description",
+    "input",
+    "output",
+    "conversation",
+)
 
 # schema 节点里要求为字符串的字段
 _SCHEMA_STRING_KEYS = ("title", "description", "format")
 
 _IO_KEYS = ("input", "output")
+
+# conversation 段允许的键（多轮会话能力声明，需求文档 §5.2）
+_CONVERSATION_KEYS = ("enabled", "max_history_turns")
+
+# 注入历史的轮数硬上限：与 settings.conversation_max_turns 的默认值一致。
+# 契约在**上传时**就要拒绝离谱的声明，运行期还会按 settings 再收敛一次。
+MAX_HISTORY_TURNS_LIMIT = 50
 
 
 class ContractError(Exception):
@@ -113,6 +127,7 @@ def parse_contract(text: str, filename: str = MANIFEST_NAMES[0]) -> dict[str, An
 
     _validate_io(contract.get("input"), "input", filename, with_examples=True)
     _validate_io(contract.get("output"), "output", filename, with_examples=False)
+    _validate_conversation(contract.get("conversation"), filename)
 
     # 存库前做一次 JSON 基本类型体检：拦住 YAML 的日期 / 二进制 / NaN 等
     _assert_json_safe(contract, filename, path="")
@@ -271,6 +286,53 @@ def _validate_schema(node: Any, path: str, filename: str, *, depth: int) -> None
 
     if "items" in node:
         _validate_schema(node["items"], f"{path}.items", filename, depth=depth + 1)
+
+
+def _validate_conversation(node: Any, filename: str) -> None:
+    """校验多轮会话能力声明（``conversation`` 段）。
+
+    这是**能力开关**，不是入参声明：`enabled: true` 时平台才会把裁剪后的历史
+    注入 ``config.conversation``；不声明或 `false` 则完全不注入（零开销）。
+    """
+    if node is None:
+        return
+    if not isinstance(node, dict):
+        raise ContractError(f"{filename}: conversation 必须是键值映射")
+
+    for key in node:
+        if not isinstance(key, str):
+            raise ContractError(
+                f"{filename}: conversation 出现非字符串键 {key!r}"
+                "（YAML 会把 yes / no / on / off 解析成布尔值，这类键名请加引号）"
+            )
+        if key not in _CONVERSATION_KEYS and not key.startswith("x-"):
+            allowed = ", ".join(_CONVERSATION_KEYS)
+            raise ContractError(
+                f"{filename}: conversation.{key} 不是可用字段（可用：{allowed}）"
+            )
+
+    enabled = node.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ContractError(
+            f"{filename}: conversation.enabled 必须是布尔值（true / false）"
+        )
+
+    max_turns = node.get("max_history_turns")
+    if max_turns is not None:
+        if isinstance(max_turns, bool) or not isinstance(max_turns, int):
+            raise ContractError(
+                f"{filename}: conversation.max_history_turns 必须是整数"
+            )
+        if not 1 <= max_turns <= MAX_HISTORY_TURNS_LIMIT:
+            raise ContractError(
+                f"{filename}: conversation.max_history_turns 必须在"
+                f" 1..{MAX_HISTORY_TURNS_LIMIT} 之间（实际 {max_turns}）"
+            )
+        if enabled is not True:
+            raise ContractError(
+                f"{filename}: conversation.max_history_turns 只有在"
+                " conversation.enabled: true 时才生效，请一并声明"
+            )
 
 
 def _validate_examples(examples: Any, path: str, filename: str) -> None:

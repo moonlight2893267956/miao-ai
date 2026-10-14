@@ -17,6 +17,7 @@ from sqlalchemy import select, update
 
 from .api.agents import router as agents_router
 from .api.auth import router as auth_router
+from .api.conversations import router as conversations_router
 from .api.health import router as health_router
 from .api.invoke import router as invoke_router
 from .api.keys import router as keys_router
@@ -213,8 +214,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     prewarm_task = asyncio.create_task(_prewarm_active_agents())
     # 启动后台 watchdog
     watchdog_task = asyncio.create_task(_agent_watchdog())
-    # 创建异步任务 worker
-    app.state.task_worker = TaskWorker(max_workers=settings.invoke_async_max_workers)
+    # 创建异步任务 worker（绑定主事件循环：DB 连接池不能跨 loop 复用）
+    app.state.task_worker = TaskWorker(
+        max_workers=settings.invoke_async_max_workers,
+        loop=asyncio.get_running_loop(),
+    )
     yield
     log.info("miao.shutdown")
     # 停止 prewarm（如果还在跑）
@@ -272,6 +276,8 @@ app.include_router(keys_router, prefix="/api/v1", dependencies=login_required)
 app.include_router(providers_router, prefix="/api/v1", dependencies=login_required)
 app.include_router(models_router, prefix="/api/v1", dependencies=login_required)
 app.include_router(invoke_router, prefix="/api/v1")
+# 会话管理同样用 per-agent API Key 鉴权（Bearer），因此不挂 login_required
+app.include_router(conversations_router, prefix="/api/v1")
 
 
 @app.get("/")

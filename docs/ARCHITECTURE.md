@@ -140,6 +140,21 @@ Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 
 │ created_at       │
 │ completed_at     │
 └──────────────────┘
+        │ (多轮会话)
+        │ 1──N
+        ▼
+┌──────────────────────┐     ┌──────────────────────────┐
+│   Conversation       │ 1─N │   ConversationTurn       │
+│                      │     │                          │
+│ id (UUID)            │     │ id (UUID)                │
+│ agent_id (FK)        │     │ conversation_id (FK)     │
+│ api_key_id (FK 归属) │     │ turn_index（会话内唯一）  │
+│ metadata (JSON)      │     │ input / output (JSON)    │
+│ created_at           │     │ status (running/succeeded│
+│ expires_at           │     │         /failed)         │
+│ updated_at           │     │ trace_id                 │
+└──────────────────────┘     │ created_at               │
+                             └──────────────────────────┘
 ```
 
 ### 4.1 Agent（机器人）
@@ -271,6 +286,25 @@ Miao AI 是一个**自托管的 AI Agent 运行平台**。用户上传自己的 
 | POST | `/agents/{name}/invoke/stream` | Bearer | SSE 流式调用 |
 | POST | `/agents/{name}/invoke/async` | Bearer | 异步调用（返回 request_id） |
 | GET | `/agents/{name}/invoke/async/{id}` | 无 | 查询异步任务状态 |
+
+### 5.8 多轮会话（Conversations）
+| 方法 | 路径 | 鉴权 | 说明 |
+|------|------|------|------|
+| POST | `/agents/{name}/conversations` | Bearer | 新建会话（TTL 缺省 1h，上限 24h） |
+| GET | `/agents/{name}/conversations` | Bearer | 列表（仅当前 API key 创建的会话） |
+| GET | `/agents/{name}/conversations/{cid}` | Bearer | 详情（含全部轮次） |
+| DELETE | `/agents/{name}/conversations/{cid}` | Bearer | 删除（轮次级联删除） |
+
+会话由**平台**存历史、agent 保持无状态：调用时带 `metadata.conversation_id`，平台
+先落一条 `running` 轮次占位 → 把裁剪后的历史注入 `config.conversation`
+（**仅当**生效版本的 `agent.yaml` 声明 `conversation.enabled: true`）→ 执行完回写
+`succeeded` / `failed`。不传 `conversation_id` 时这条链路完全不触发，`config` 与
+响应体与改造前逐字节一致。
+
+配额与裁剪：单会话最多 50 轮（超限 429）、同会话并发 1（其余 409）、注入历史先按
+轮数再按 32KB 字节裁剪且**永不裁剪第 1 轮**。实现集中在
+`backend/app/services/conversation.py`，端点见 `backend/app/api/conversations.py`，
+规则说明见 `docs/api-reference.md`。
 
 ---
 
@@ -545,6 +579,8 @@ frontend/src/
  │  Bearer {api_key}           │                              │                    │
  ├────────────────────────────►│ 鉴权 → _auth_agent()        │                    │
  │                             │ 限流 → try_acquire_token()   │                    │
+ │                             │ [带会话] 开闸门 → 落 running │                    │
+ │                             │   轮次 → 注入 config.conversation                 │
  │                             │ invoke(payload, config)      │                    │
  │                             ├─────────────────────────────►│ POST /invoke       │
  │                             │                              ├───────────────────►│ trace start
@@ -552,7 +588,10 @@ frontend/src/
  │                             │                              │ ← LLM response ────│ DashScope
  │                             │                              │ ← trace end ────────│
  │                             │ ← {output, trace_id} ────────┤                    │
+ │                             │ [带会话] 回写轮次 → 释放闸门 │                    │
  │  ← 200 {output, trace_id}   │                              │                    │
+ │     (+ conversation_id /    │                              │                    │
+ │      turn / history_truncated 仅带会话时)                    │                    │
 ```
 
 ### 8.3 SSE 流式调用
@@ -562,16 +601,21 @@ frontend/src/
  │                                         │                            │
  │ invoke_stream(payload)                   │                            │
  ├────────────────────────────────────────►│ POST /invoke/stream        │
- │  ← SSE line 1 ────────────────────────┤ yield "event: token\n..."   │
- │  ← SSE line 2 ────────────────────────┤ yield "event: token\n..."   │
+ │  ← SSE conversation ───────────────────┤ (带会话时平台补发的首条事件) │
+ │  ← SSE token 1 ────────────────────────┤ yield {"token": "..."}      │ agent 返回 generator
+ │  ← SSE token 2 ────────────────────────┤ yield {"token": "..."}      │ → 前端打字机
  │  ...                                    │                            │
- │  ← SSE output ─────────────────────────┤ yield "event: output\n..." │ (非 generator 时)
- │  ← SSE done  ──────────────────────────┤ yield "event: done\n..."   │
- │                                         │                            │
- │  chunk_queue.put_nowait(...)            │                            │
+ │  ← SSE output ─────────────────────────┤ yield "event: output\n..." │ (agent 返回普通 dict 时)
+ │  ← SSE done  ──────────────────────────┤ yield {"output": {...}}     │ 收尾块 → done.output
+ │                                         │  (不当 token 转发)          │ 平台据此记录该轮 output
+ │  流结束回写轮次（error / 断连记 failed） │                            │
  │  StreamingResponse → ──────────────────────────────────────────────►│ ReadableStream
  │                                                                     │ 逐 token 渲染 + 光标动画
 ```
+
+> 收尾块约定：agent 的 generator 最后一个 chunk 用 `{"output": {...}}` 给出结构化结果。
+> 平台既不把它当 token 渲染，也不会丢 —— 它随 `done` 下发并写进该轮记录，
+> 这样**流式轮次也能作为下一轮追问的上下文**。详见 `agent_templates/miao_runner.py`。
 
 ### 8.4 异步调用 + Webhook
 
@@ -584,15 +628,20 @@ frontend/src/
  │  ← 202 {request_id, status_url}     │                                  │
  │                                     │                                  │
  │  GET /invoke/async/{request_id}    │ Thread: invoke()                 │
- ├─────────────────────────────────────┤  ├─ DB: status=running          │
+ ├─────────────────────────────────────┤  ├─ DB: status=running（回主循环）│
  │  ← 200 {status: "running"}          │  ├─ managed.invoke()            │
- │                                     │  ├─ DB: status=success          │
+ │                                     │  ├─ DB: status=success + 会话轮次 │
  │                                     │  ├─ POST webhook_url ──────────►│
  │                                     │  │   ← 200 OK ──────────────────┤
  │                                     │  └─ DB: webhook_delivered=true  │
  │  GET /invoke/async/{request_id}    │                                  │
  │  ← 200 {status: "success", ...}     │                                  │
 ```
+
+> DB 步骤必须回到**主事件循环**执行：engine 与连接池绑定主循环，在工作线程里
+> 另起 event loop 复用同一个池会抛 `Future attached to a different loop`，
+> 且失效连接退回池后会污染后续请求。agent 调用与 webhook 这类阻塞 IO
+> 仍留在工作线程。
 
 ---
 

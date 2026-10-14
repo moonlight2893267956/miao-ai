@@ -141,3 +141,12 @@ async def test_invoke_success_passes_input_and_metadata(
         # 所以 mock 收到 invoke(body.input)，即 positional arg
         # call_args[0] = positional args, call_args[1] = kwargs
         assert call_args[0][0] == {"question": "what is the answer"}
+        # 不带 conversation_id：config 只有 trace 三件套，不含 conversation
+        # （多轮会话注入的兼容底线，详见 tests/test_conversations.py）
+        assert call_args[0][2] == {
+            "langfuse_user_id": "u-1",
+            "langfuse_session_id": "s-1",
+            "langfuse_tags": ["prod"],
+        }
+        # 响应体也不该新增字段
+        assert set(body) == {"output", "trace_id"}

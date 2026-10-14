@@ -7,6 +7,15 @@ Miao Runner - 每个 agent 子进程实际跑的 FastAPI app。
 子进程从父进程继承环境变量（LANGFUSE_PUBLIC_KEY / SECRET_KEY / BASE_URL）。
 
 Phase 3: 支持 /invoke/stream SSE 流式输出。
+
+流式约定（agent 侧，见 demos/*/agent.py）
+----------------------------------------
+  * agent 的 `invoke(input, config)` 在 `config["stream"]` 为真时**返回 generator**；
+  * 正文逐段 `yield {"token": "..."}` → runner 转成 `event: token`（前端据此做打字机）；
+  * 结构化结果可选地在最后 `yield {"output": {...}}` → runner **不当 token 转发**，
+    而是随 `event: done` 下发，平台据此记录本轮 output
+    （不这么做时，流式轮次在会话历史里没有 output，下一轮追问会失去依据）；
+  * 返回普通 dict 的 agent → 单个 `event: output` + `event: done`，没有打字机效果。
 """
 import asyncio
 import importlib.util
@@ -108,6 +117,20 @@ def _sse_event(event: str, data: str) -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 
+def _is_final_output_chunk(chunk) -> bool:
+    """流式收尾块约定：agent 最后一个 chunk 用 ``{"output": {...}}`` 给结构化结果。
+
+    收尾块**不当 token 转发**（它不是正文），而是放进 ``done`` 事件，让平台能记录
+    这一轮的 output —— 否则流式轮次在会话历史里就没有 output，下一轮追问会失去依据。
+    约定是纯新增的：既有 agent 只 yield ``{"token": ...}``，不受影响。
+    """
+    return (
+        isinstance(chunk, dict)
+        and "token" not in chunk
+        and isinstance(chunk.get("output"), dict)
+    )
+
+
 @app.post("/invoke/stream")
 async def invoke_stream(req: InvokeRequest):
     """流式 invoke，返回 SSE (text/event-stream)。
@@ -122,6 +145,7 @@ async def invoke_stream(req: InvokeRequest):
     async def generate():
         started = time.time()
         output_chunks = []
+        final_output = None  # 收尾块 {"output": {...}}：结构化结果，随 done 事件下发
         with langfuse.start_as_current_observation(
             as_type="span",
             name="agent:invoke/stream",
@@ -148,6 +172,10 @@ async def invoke_stream(req: InvokeRequest):
             if inspect.isasyncgen(result):
                 try:
                     async for chunk in result:
+                        if _is_final_output_chunk(chunk):
+                            final_output = chunk["output"]
+                            output_chunks.append(chunk["output"])
+                            continue
                         chunk_str = json.dumps(chunk, ensure_ascii=False, default=str)
                         output_chunks.append(chunk)
                         yield _sse_event("token", chunk_str)
@@ -158,6 +186,10 @@ async def invoke_stream(req: InvokeRequest):
                 # sync generator: 逐 chunk 转发
                 try:
                     for chunk in result:
+                        if _is_final_output_chunk(chunk):
+                            final_output = chunk["output"]
+                            output_chunks.append(chunk["output"])
+                            continue
                         chunk_str = json.dumps(chunk, ensure_ascii=False, default=str)
                         output_chunks.append(chunk)
                         yield _sse_event("token", chunk_str)
@@ -173,10 +205,11 @@ async def invoke_stream(req: InvokeRequest):
             elapsed_ms = int((time.time() - started) * 1000)
             span.update(output=output_chunks, metadata={"latency_ms": elapsed_ms})
             trace_id = langfuse.get_current_trace_id()
-            yield _sse_event(
-                "done",
-                json.dumps({"trace_id": trace_id, "latency_ms": elapsed_ms}),
-            )
+            done_payload = {"trace_id": trace_id, "latency_ms": elapsed_ms}
+            if final_output is not None:
+                # 有收尾块时把结构化结果随 done 下发（平台据此记录该轮 output）
+                done_payload["output"] = final_output
+            yield _sse_event("done", json.dumps(done_payload, ensure_ascii=False, default=str))
 
     return StreamingResponse(
         generate(),

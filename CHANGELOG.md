@@ -5,6 +5,36 @@
 
 ## [Unreleased]
 
+### Added
+- 多轮会话（Conversation）能力 —— 需求文档 P0+P1（平台侧）与 P3（Try Run UI）；
+  业务 agent 的追问逻辑（P2）与调用方 SDK 接入不在本次范围：
+  - **平台侧（P0+P1）**
+    - 会话管理：`POST/GET/DELETE /api/v1/agents/{name}/conversations[/{cid}]`，per-agent API Key 鉴权，会话按 `api_key_id` 隔离（他人的 key 一律 403）
+    - 带会话调用：`metadata.conversation_id`（`invoke` / `invoke/stream` / `invoke/async` 语义一致）；响应新增 `conversation_id` / `turn` / `history_truncated` / `injected_turns`，流式补发 `conversation` 事件，异步 webhook 载荷带 `conversation_id` / `turn`
+    - 历史注入：仅当生效版本 `agent.yaml` 声明 `conversation.enabled: true` 时才注入 `config.conversation`；两级裁剪（轮数 → 32KB 字节），第 1 轮永不裁剪
+    - 轮次记账：先落 `running` 占位再执行，结束回写 `succeeded` / `failed`；同会话并发 1（409）、轮次上限 50（429）、过期 410
+    - `agent.yaml` 新增顶层 `conversation` 段（`enabled` / `max_history_turns`），见 `docs/agent-contract.md` §4.4
+    - 迁移 `c4e8f1a2b9d7`：`conversations` / `conversation_turns` 两张表
+  - **Try Run UI（P3）**
+    - 会话开关（未声明 `conversation.enabled` 的 agent 置灰并提示）、开启后首次 Run 惰性建会话、换 API Key 自动重置
+    - 输出区改为**轮次列表（最新在上）**，支持 SSE 逐 token 追加；每轮显示 轮次号 / 状态 / **本轮注入给 agent 的历史（`injected_turns`）** / 是否裁剪 / trace / 入参摘要
+    - 「重置」按钮（清本地状态并尽力删除服务端会话）
+  - **前端 API**：`createConversation` / `getConversation` / `deleteConversation`，`metadata` 支持 `conversation_id`；
+    SSE 解析新增 `event: conversation` 分支（此前未知事件会被当 token 拼进正文）
+
+### Fixed
+- 流式输出（SSE）与多轮会话的两处断链：
+  - 逐 token 流的 agent 原来无法把结构化结果交给平台 → 该轮在会话历史里 output 为空，
+    下一轮追问会报「追问需要上下文」。新增收尾块约定 `yield {"output": {...}}`：runner 不当
+    token 转发，而是随 `event: done` 下发，平台据此落库该轮 output（`backend/agent_templates/miao_runner.py`）
+  - 前端流式渲染在 `done` 时只尝试 `JSON.parse(拼起来的正文)`，现优先使用 `done.output`
+    （`frontend/src/app/agents/[name]/page.tsx`）
+- `demos/wubi-explainer` 补齐流式实现（此前只有它和 json-repairer 没做，勾了「流式输出」没有打字机效果）：
+  `invoke` 在 `config["stream"]` 为真时返回 generator，按块吐正文 + 收尾块给结构化结果
+- 异步 invoke（`/invoke/async`）两处既有缺陷（此前无测试覆盖，链路实际不可用）：
+  - 工作线程自建事件循环却复用主循环的连接池 → `Future attached to a different loop`，且失效连接退回池中会污染后续主循环请求；现改为 agent 调用留在工作线程、DB 操作统一用 `run_coroutine_threadsafe` 回主事件循环
+  - `invoke_tasks.id` 是 Uuid 列，绑定 `str` 触发 `'str' object has no attribute 'hex'`，任务状态永远停在 `pending` 且 webhook 不投递；现按 UUID 对象绑定
+
 ## [0.4.0] - 2026-06-28
 
 ### Changed

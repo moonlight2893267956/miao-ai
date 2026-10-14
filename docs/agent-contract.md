@@ -14,6 +14,9 @@
 
 契约是**可选**的。不放声明文件的 agent 一切照旧，不受任何影响。
 
+除 UI 之外，契约还承载一个**能力开关**：`conversation.enabled`（见 4.4）——声明它
+平台才会在调用时注入多轮会话历史。其余字段仍然只影响 UI 与文档，不参与请求校验。
+
 ## 2. 放在哪里
 
 放在 agent 代码包的**根目录**（与 `agent.py` 同级），文件名二选一：
@@ -67,6 +70,7 @@ output:
 | `description` | string | 否 | 一句话说明这个 agent 做什么 |
 | `input` | mapping | 否 | 入参声明，见 4.2 |
 | `output` | mapping | 否 | 出参声明，见 4.2 |
+| `conversation` | mapping | 否 | 多轮会话能力声明，见 4.4；不声明 = 不注入历史 |
 | `x-*` | 任意 | 否 | 自定义扩展，平台原样保留、不做解释 |
 
 **未列出的顶层字段会直接报错**（防止把 `imput` 写成 `input` 却毫无提示）。
@@ -109,6 +113,30 @@ output:
 > 表单对复杂字段（对象、对象数组）没有输入控件，会退化成等宽 JSON 小框，
 > 所以**嵌套结构务必配 `examples`**，让用户一键填充后改几个字即可。
 
+### 4.4 `conversation`（多轮会话能力）
+
+声明这个 agent 需要「多轮会话上下文」，平台才会在调用时把历史注入
+`config.conversation`。**不声明或 `enabled: false` 时平台不做任何注入**，
+历史零开销（也是默认行为）。
+
+```yaml
+conversation:
+  enabled: true
+  max_history_turns: 10   # 请求读取的最大历史轮次，1..50，缺省 10
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | 否 | 缺省 `false`。只有 `true` 时平台才注入 `config.conversation` |
+| `max_history_turns` | int | 否 | 注入的最大轮次（1..50，缺省 10）；**必须与 `enabled: true` 一起声明** |
+| `x-*` | 任意 | 否 | 自定义扩展 |
+
+两条硬规则（写错会在上传时就报错，不会静默失效）：
+
+- `max_history_turns` 只有在 `enabled: true` 时才生效，单独写它会直接报错；
+- 声明了 `enabled: true` 的 agent **应该**在 `invoke` 里读取 `config.get("conversation")`，
+  否则等于多付了带宽却没用到上下文。
+
 ## 5. 平台行为
 
 | 时机 | 行为 |
@@ -116,7 +144,8 @@ output:
 | 上传版本（`POST /agents/{name}/versions`） | 有声明且合法 → 与版本一起入库；**有声明但非法 → 400 拒绝**；没有声明 → 正常入库，契约为空 |
 | 激活版本（`POST /agents/{name}/versions/activate`） | 解包后**重新解析并覆盖**契约（保证"生效契约 == 实际部署的代码"）；解析异常只记 warning，**绝不阻断激活** |
 | 切换版本 | 契约随版本走：新版本没带声明文件，旧契约自动消失，不会残留误导 UI |
-| 调用（`/invoke`、`/invoke/stream`） | **完全不看契约**。类型不符只在表单里给黄色提示，不拦截请求 |
+| 调用（`/invoke`、`/invoke/stream`、`/invoke/async`） | `input` / `output` 类型不符只在表单里给黄色提示，**不拦截请求**；`conversation` 段是例外——它是能力开关，平台据此决定是否注入历史 |
+| 带 `conversation_id` 的调用 | 仅当生效版本的契约声明了 `conversation.enabled: true` 时，才注入按 §4.4 规则裁剪后的 `config.conversation`；不声明则即使传了 `conversation_id` 平台也只记账、不注入 |
 
 ## 6. 校验规则与报错
 
@@ -253,6 +282,8 @@ YAML 1.1 会把一批**看起来像字符串的值解析成别的类型**，这�
 ## 9. 兼容性与演进
 
 - **没有声明文件的 agent**：上传、激活、调用、Try Run 界面全部与不带此能力时一致。
-- **契约只影响 UI**：不参与任何请求校验，不影响 `invoke` 的性能与行为。
+- **契约基本只影响 UI**：不参与任何请求校验，不影响 `invoke` 的性能与行为。
+  唯一例外是 4.4 的 `conversation` 能力开关——它以 opt-in 的方式决定是否注入会话历史；
+  不声明（或 `enabled: false`）时，带 `conversation_id` 的调用也不会产生注入开销。
 - 平台升级契规范时通过 `api_version` 区分；旧版本声明在新平台若不再支持会被明确拒绝，
   而不是被静默误读。

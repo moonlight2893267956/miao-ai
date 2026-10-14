@@ -84,6 +84,18 @@ class Settings(BaseSettings):
     invoke_async_default_timeout: float = 300.0
     webhook_max_retries: int = 3
     webhook_retry_base_delay: float = 1.0
+
+    # ===== Conversation（多轮会话，需求文档 §7） =====
+    # 单会话最大轮次：超出后 invoke 返回 429
+    conversation_max_turns: int = 50
+    # 未声明 conversation.max_history_turns 时，注入历史的默认轮数上限
+    conversation_default_max_history_turns: int = 10
+    # 注入历史的字节上限（两级裁剪的第二级）
+    conversation_max_history_bytes: int = 32 * 1024
+    # 新建会话未指定 ttl_seconds 时的默认有效期
+    conversation_default_ttl_seconds: int = 3600
+    # ttl_seconds 上限（24 小时）
+    conversation_max_ttl_seconds: int = 86400
     webhook_callback_timeout: float = 10.0
 
     # ===== Docker Runtime =====

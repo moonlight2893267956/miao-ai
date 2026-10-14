@@ -21,6 +21,7 @@
 | 版本管理 + 激活 | 自建 | ✅ |
 | API Key 鉴权 | 自建（sha256 哈希） | ✅ |
 | 统一 invoke API | 自建 | ✅ |
+| 多轮会话（平台存历史 + 注入） | 自建 | ✅ 后端（P0+P1）；业务 agent 追问与前端轮次 UI 待做 |
 | Langfuse 自动 trace 注入 | miao_runner 自动上报 | ✅ |
 | 业务 PG 存储 | Neon（serverless） | ✅ |
 | 对象存储 | 腾讯云 COS | ✅ |

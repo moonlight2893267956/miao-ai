@@ -15,6 +15,8 @@ from app.models import (  # noqa: F401
     Agent,
     AgentVersion,
     ApiKey,
+    Conversation,
+    ConversationTurn,
     InvokeTask,
     LlmModel,
     ModelProvider,

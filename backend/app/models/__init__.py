@@ -4,6 +4,7 @@ from .agent import Agent
 from .agent_version import AgentVersion
 from .api_key import ApiKey
 from .base import Base
+from .conversation import Conversation, ConversationTurn
 from .invoke_task import InvokeTask
 from .llm_model import LlmModel
 from .model_provider import ModelProvider
@@ -15,6 +16,8 @@ __all__ = [
     "AgentVersion",
     "ApiKey",
     "Base",
+    "Conversation",
+    "ConversationTurn",
     "InvokeTask",
     "LlmModel",
     "ModelProvider",

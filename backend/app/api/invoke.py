@@ -5,10 +5,17 @@ Invoke API：用户调用已激活 agent 的统一入口。
 Trace 上下文从 metadata 提取，转发给 agent 子进程（miao_runner 会上报到 Langfuse）。
 
 Phase 3: 支持 SSE 流式输出（/invoke/stream）+ 异步调用 + webhook 回调（/invoke/async）。
+
+多轮会话（P1）：`metadata.conversation_id` 存在时，平台先落一条 running 轮次占位，
+再把裁剪后的历史注入 `config.conversation`（仅当生效版本的契约声明
+`conversation.enabled: true`），执行完回写 succeeded / failed。
+**不传 conversation_id 时这条链路完全不触发**，config 与响应保持原样。
 """
 import asyncio
 import json
+import threading
 import uuid as _uuid
+from dataclasses import dataclass
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
@@ -18,7 +25,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..db import AsyncSessionLocal, get_session
+from ..logging import get_logger
+from ..models.agent import Agent
 from ..models.api_key import ApiKey
+from ..models.conversation import Conversation, ConversationTurn
 from ..models.invoke_task import InvokeTask
 from ..runtime.manager import ManagedAgent
 from ..runtime.registry import AgentRegistry
@@ -27,9 +37,13 @@ from ..schemas.invoke_task import (
     InvokeAsyncResponse,
     InvokeTaskStatus,
 )
+from ..services import conversation as conversation_service
+from ..services.conversation import TurnAccounting
 from ..utils import get_agent_or_404, hash_key
 
 router = APIRouter(prefix="/agents/{name}", tags=["invoke"])
+
+log = get_logger(__name__)
 
 
 class InvokeRequest(BaseModel):
@@ -42,18 +56,43 @@ class InvokeResponse(BaseModel):
     trace_id: str | None = None
 
 
-async def _auth_agent(name: str, request: Request, session: AsyncSession) -> ManagedAgent:
-    """鉴权 + 查 agent + 验证 key + 检查运行状态。
+class ConversationInvokeResponse(InvokeResponse):
+    """带会话调用的响应（需求文档 §4.3 的新增可选字段）。
 
-    返回 running 状态的 ManagedAgent，否则抛 HTTPException。
+    单独建模型而不是给 `InvokeResponse` 加可选字段：不传会话时响应体与改造前
+    逐字节一致，老调用方拿不到任何新键。
     """
-    auth = request.headers.get("authorization", "")
-    if not auth.startswith("Bearer "):
+
+    conversation_id: str
+    turn: int
+    history_truncated: bool = False
+    # 本轮实际注入给 agent 的轮次号（未声明 conversation.enabled 时为空数组）
+    injected_turns: list[int] = Field(default_factory=list)
+
+
+@dataclass
+class ApiKeyAuth:
+    """Bearer API Key 鉴权结果（invoke 与会话 CRUD 共用）。"""
+
+    agent: Agent
+    api_key: ApiKey
+
+
+async def authenticate_api_key(
+    name: str, request: Request, session: AsyncSession
+) -> ApiKeyAuth:
+    """校验 ``Bearer <api_key>``，返回 agent 行与命中的 key 行。
+
+    只做鉴权（401 / 404），**不**关心 agent 进程是否在跑——会话 CRUD 不需要
+    拉起子进程，因此把「运行状态检查」留给 invoke 路径的 :func:`_auth_agent`。
+    """
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="missing or invalid Authorization header (expected: Bearer <api_key>)",
         )
-    raw_key = auth[7:].strip()
+    raw_key = auth_header[7:].strip()
     if not raw_key:
         raise HTTPException(status_code=401, detail="empty API key")
 
@@ -67,8 +106,20 @@ async def _auth_agent(name: str, request: Request, session: AsyncSession) -> Man
             ApiKey.revoked_at.is_(None),
         )
     )
-    if not result.scalar_one_or_none():
+    api_key = result.scalar_one_or_none()
+    if not api_key:
         raise HTTPException(401, "invalid or revoked API key")
+    return ApiKeyAuth(agent=agent, api_key=api_key)
+
+
+async def _auth_agent(
+    name: str, request: Request, session: AsyncSession
+) -> tuple[ManagedAgent, ApiKeyAuth]:
+    """鉴权 + 检查 agent 运行状态（必要时自动激活）。
+
+    返回 ``(managed, auth)``，否则抛 HTTPException。
+    """
+    auth = await authenticate_api_key(name, request, session)
 
     managed = AgentRegistry.instance().get(name)
     if not managed or managed.status != "running":
@@ -82,7 +133,7 @@ async def _auth_agent(name: str, request: Request, session: AsyncSession) -> Man
                 detail=f"agent '{name}' not running and auto-activate failed (status={cur_status})",
             )
 
-    return managed
+    return managed, auth
 
 
 async def _try_auto_activate(name: str, session: AsyncSession) -> ManagedAgent | None:
@@ -169,7 +220,190 @@ def _build_trace_config(metadata: dict) -> dict:
     return config
 
 
-@router.post("/invoke", response_model=InvokeResponse)
+# ===== 多轮会话：轮次开启 / 收尾 =====
+
+
+@dataclass
+class ConversationContext:
+    """一次带会话调用所需的全部状态（不传 conversation_id 时为 None）。"""
+
+    conversation: Conversation
+    turn: ConversationTurn
+    accounting: TurnAccounting
+    # 生效的 config.conversation；None = 该 agent 未声明 conversation.enabled，不注入
+    injected: dict | None
+    turn_index: int
+    history_truncated: bool
+    # 本轮实际注入的轮次号（未声明 conversation.enabled 时为空）
+    injected_turns: list[int]
+
+    @property
+    def public_id(self) -> str:
+        return conversation_service.format_conversation_id(self.conversation.id)
+
+
+def _conversation_event_line(ctx: ConversationContext) -> str:
+    """流式调用时先发一条 conversation 事件，让调用方拿到轮次号与注入明细。"""
+    payload = {
+        "conversation_id": ctx.public_id,
+        "turn": ctx.turn_index,
+        "history_truncated": ctx.history_truncated,
+        "injected_turns": ctx.injected_turns,
+    }
+    return f"event: conversation\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def _open_conversation_turn(
+    *,
+    metadata: dict,
+    auth: ApiKeyAuth,
+    session: AsyncSession,
+    payload: dict,
+) -> ConversationContext | None:
+    """带会话调用前：加闸门 → 校验会话 → 占位轮次 → 组装注入历史。
+
+    ``metadata`` 上没有 ``conversation_id`` 时直接返回 None，调用方走原路径
+    （不查会话表、不注入、响应体不变）。
+
+    :raises HTTPException: 404 不存在 / 403 归属不符 / 410 已过期 /
+        429 轮次超上限 / 409 同会话并发
+    """
+    raw_id = metadata.get("conversation_id")
+    if raw_id is None:
+        return None
+    if not isinstance(raw_id, str) or not raw_id.strip():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"conversation '{raw_id}' not found",
+        )
+    raw_id = raw_id.strip()
+    internal_id = conversation_service.parse_conversation_id(raw_id)
+    if internal_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"conversation '{raw_id}' not found",
+        )
+
+    # 闸门按规范化后的 id 键控：`conv_<hex>` 与裸 UUID 指向同一把锁
+    gate_key = str(internal_id)
+    gate = conversation_service.acquire_conversation_gate(gate_key)
+    if gate is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"conversation '{raw_id}' has a concurrent turn in flight, "
+                "retry after it finishes"
+            ),
+        )
+
+    try:
+        conversation = await conversation_service.resolve_conversation(
+            session,
+            raw_id,
+            agent_id=auth.agent.id,
+            api_key_id=auth.api_key.id,
+        )
+        turn = await conversation_service.begin_turn(
+            session,
+            conversation=conversation,
+            payload=payload,
+            max_turns=settings.conversation_max_turns,
+        )
+        accounting = TurnAccounting(
+            conversation_id=conversation_service.format_conversation_id(conversation.id),
+            turn_index=turn.turn_index,
+            turn_id=turn.id,
+            gate_key=gate_key,
+            gate=gate,
+        )
+
+        # 是否注入历史由**生效版本的契约**决定（opt-in，不声明就不注入）
+        declaration = await conversation_service.get_conversation_declaration(
+            session, agent_id=auth.agent.id
+        )
+        injected: dict | None = None
+        injected_turns: list[int] = []
+        if declaration is not None:
+            max_injected = conversation_service.resolve_max_history_turns(
+                declaration,
+                settings.conversation_default_max_history_turns,
+                settings.conversation_max_turns,
+            )
+            history = await conversation_service.load_injected_history(
+                session,
+                conversation_id=conversation.id,
+                before_turn_index=turn.turn_index,
+                max_turns=max_injected,
+                max_bytes=settings.conversation_max_history_bytes,
+            )
+            injected = conversation_service.build_injected_config(
+                conversation_id=conversation.id,
+                turn_index=turn.turn_index,
+                max_turns_injected=max_injected,
+                history=history,
+            )
+            injected_turns = history.turn_indexes
+    except BaseException:
+        # 任一环节失败都不能留着闸门（否则该会话后续请求会一直 409）
+        conversation_service.release_conversation_gate(gate_key, gate)
+        raise
+
+    log.info(
+        "conversation.turn.opened",
+        conversation_id=accounting.conversation_id,
+        turn=turn.turn_index,
+        injected=injected is not None,
+    )
+    return ConversationContext(
+        conversation=conversation,
+        turn=turn,
+        accounting=accounting,
+        injected=injected,
+        turn_index=turn.turn_index,
+        history_truncated=bool(injected and injected["truncated"]),
+        injected_turns=injected_turns,
+    )
+
+
+async def _close_conversation_turn(
+    ctx: ConversationContext | None,
+    session: AsyncSession,
+    *,
+    succeeded: bool,
+    output: dict | None = None,
+    trace_id: str | None = None,
+) -> None:
+    """收尾：回写轮次结果并释放闸门（无会话时是空操作）。"""
+    if ctx is None:
+        return
+    try:
+        await conversation_service.finish_turn(
+            session,
+            turn=ctx.turn,
+            conversation=ctx.conversation,
+            succeeded=succeeded,
+            output=output,
+            trace_id=trace_id,
+        )
+    except Exception:
+        log.exception(
+            "conversation.turn.close_failed",
+            conversation_id=ctx.public_id,
+            turn=ctx.turn_index,
+        )
+    finally:
+        conversation_service.release_conversation_gate(
+            ctx.accounting.gate_key, ctx.accounting.gate
+        )
+
+
+def _apply_conversation_config(config: dict, ctx: ConversationContext | None) -> None:
+    """有会话且 agent 声明开启时，把历史塞进 config（否则 config 一字不改）。"""
+    if ctx is not None and ctx.injected is not None:
+        config["conversation"] = ctx.injected
+
+
+@router.post("/invoke", response_model=InvokeResponse | ConversationInvokeResponse)
 async def invoke(
     name: str,
     body: InvokeRequest,
@@ -177,20 +411,47 @@ async def invoke(
     session: AsyncSession = Depends(get_session),
 ) -> InvokeResponse:
     # 鉴权 + 验证
-    managed = await _auth_agent(name, request, session)
+    managed, auth = await _auth_agent(name, request, session)
     # 限流检查
     ok = await asyncio.to_thread(managed.try_acquire_token)
     if not ok:
         raise HTTPException(status_code=429, detail=f"rate limit exceeded for agent '{name}'")
     config = _build_trace_config(body.metadata)
+    ctx = await _open_conversation_turn(
+        metadata=body.metadata, auth=auth, session=session, payload=body.input
+    )
+    _apply_conversation_config(config, ctx)
     try:
         result_dict = await asyncio.to_thread(managed.invoke, body.input, settings.invoke_sync_timeout, config)
+    except asyncio.CancelledError:
+        # 客户端断连：轮次记 failed，闸门必须释放（否则该会话会一直 409）
+        await _close_conversation_turn(ctx, session, succeeded=False)
+        raise
     except Exception as e:
+        await _close_conversation_turn(ctx, session, succeeded=False)
         raise HTTPException(status_code=502, detail=f"agent invoke failed: {e}")
-    return InvokeResponse(
-        output=result_dict.get("output", {}),
-        trace_id=result_dict.get("trace_id"),
+    output = result_dict.get("output", {})
+    trace_id = result_dict.get("trace_id")
+    await _close_conversation_turn(
+        ctx, session, succeeded=True, output=output, trace_id=trace_id
     )
+    if ctx is not None:
+        return ConversationInvokeResponse(
+            output=output,
+            trace_id=trace_id,
+            conversation_id=ctx.public_id,
+            turn=ctx.turn_index,
+            history_truncated=ctx.history_truncated,
+            injected_turns=ctx.injected_turns,
+        )
+    return InvokeResponse(output=output, trace_id=trace_id)
+
+
+def _parse_json_or_none(raw: str) -> object | None:
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return None
 
 
 @router.post("/invoke/stream")
@@ -204,26 +465,62 @@ async def invoke_stream(
 
     agent 函数需返回 generator/async generator 才会产生 token 事件，
     否则只会返回单个 done 事件。
+
+    带会话时：先补发一条 ``conversation`` 事件（会话 ID / 轮次号 / 裁剪标记），
+    流正常结束记该轮 succeeded（纯 token 流的 output 记为 null，因为 runner 的
+    ``done`` 事件只带 trace_id；只有非 generator 的 agent 会给出完整 ``output``
+    事件），中断或收到 error 事件记 failed。
     """
-    managed = await _auth_agent(name, request, session)
+    managed, auth = await _auth_agent(name, request, session)
     ok = await asyncio.to_thread(managed.try_acquire_token)
     if not ok:
         raise HTTPException(status_code=429, detail=f"rate limit exceeded for agent '{name}'")
     config = _build_trace_config(body.metadata)
+    ctx = await _open_conversation_turn(
+        metadata=body.metadata, auth=auth, session=session, payload=body.input
+    )
+    _apply_conversation_config(config, ctx)
     # SSE 流式模式：通知 agent 函数使用 generator 逐 token 输出
     config["stream"] = True
 
     async def event_generator():
+        succeeded = False
+        errored = False
+        output: dict | None = None
+        trace_id: str | None = None
+        current_event = ""
         try:
+            if ctx is not None:
+                yield _conversation_event_line(ctx)
             async for line in managed.invoke_stream(body.input, config, timeout=settings.invoke_stream_timeout):
+                if line.startswith("event:"):
+                    current_event = line[6:].strip()
+                elif line.startswith("data:"):
+                    parsed = _parse_json_or_none(line[5:].strip())
+                    if current_event == "done" and isinstance(parsed, dict):
+                        trace_id = parsed.get("trace_id") or trace_id
+                        # 逐 token 流的 agent 可以把结构化结果随 done 下发
+                        # （约定见 miao_runner 的流式说明），这里据此记录本轮 output
+                        if output is None and isinstance(parsed.get("output"), dict):
+                            output = parsed["output"]
+                    elif current_event == "output" and isinstance(parsed, dict):
+                        output = parsed
+                    elif current_event == "error":
+                        errored = True
                 yield line + "\n"
                 # 强制让出事件循环，使 uvicorn transport 的写缓冲数据真正发到 socket。
                 # asyncio.sleep(0) 只让给 ready callbacks 不回 selector；
                 # sleep(0.001) 能回到 selector.select() 使 pending writes flush 出去，
                 # 且 1ms 延迟对 SSE 流式体验几乎无感知。
                 await asyncio.sleep(0.001)
+            succeeded = not errored
         except Exception as e:
             yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+        finally:
+            # 客户端断连 / 取消时也会走到这里：轮次记 failed，闸门必定释放
+            await _close_conversation_turn(
+                ctx, session, succeeded=succeeded, output=output, trace_id=trace_id
+            )
 
     return StreamingResponse(
         event_generator(),
@@ -242,20 +539,20 @@ async def invoke_async(
     session: AsyncSession = Depends(get_session),
 ):
     """异步调用 agent。立即返回 request_id，完成后 POST webhook_url 推送结果。"""
-    managed = await _auth_agent(name, request, session)
+    managed, auth = await _auth_agent(name, request, session)
     ok = await asyncio.to_thread(managed.try_acquire_token)
     if not ok:
         raise HTTPException(status_code=429, detail=f"rate limit exceeded for agent '{name}'")
 
     request_id = f"miao_req_{_uuid.uuid4().hex[:12]}"
     config = _build_trace_config(body.metadata)
-
-    # 查 agent_id
-    agent = await get_agent_or_404(name, session)
-    agent_id = agent.id
+    ctx = await _open_conversation_turn(
+        metadata=body.metadata, auth=auth, session=session, payload=body.input
+    )
+    _apply_conversation_config(config, ctx)
 
     task = InvokeTask(
-        agent_id=agent_id,
+        agent_id=auth.agent.id,
         agent_name=name,
         request_id=request_id,
         webhook_url=body.webhook_url,
@@ -263,15 +560,26 @@ async def invoke_async(
         input_payload=body.input,
     )
     session.add(task)
-    await session.commit()
-
-    # 提交到后台 worker
-    worker = request.app.state.task_worker
-    worker.submit(
-        str(task.id), name, managed, body.input, config,
-        body.webhook_url, body.timeout,
-        AsyncSessionLocal, settings,
-    )
+    handed_off = False
+    try:
+        await session.commit()
+        # 提交到后台 worker（会话轮次的收尾由 worker 线程用独立 session 完成）
+        worker = request.app.state.task_worker
+        worker.submit(
+            str(task.id), name, managed, body.input, config,
+            body.webhook_url, body.timeout,
+            AsyncSessionLocal, settings,
+            ctx.accounting if ctx else None,
+        )
+        handed_off = True
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"failed to submit async task: {e}"
+        )
+    finally:
+        # 未成功交接（含取消 / 断连）时把轮次记 failed 并释放闸门
+        if not handed_off:
+            await _close_conversation_turn(ctx, session, succeeded=False)
 
     return InvokeAsyncResponse(
         request_id=request_id,

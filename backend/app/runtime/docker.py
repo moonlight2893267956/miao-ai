@@ -16,6 +16,8 @@ log = logging.getLogger(__name__)
 DOCKERFILE_TEMPLATE = Path(__file__).parents[2] / "agent_templates" / "Dockerfile.template"
 
 # 需要排除的文件/目录（不进入 Docker 镜像）
+# 注意：模板最后一层是 `COPY . /app/`（支持多文件 agent 包），所以这里要排除
+# 只在开发期用的东西；agent.py / wubi/ / data/ 这类运行期依赖**不能**出现在这里。
 _DOCKERIGNORE_LINES = """
 .venv/
 *.zip
@@ -24,6 +26,7 @@ _DOCKERIGNORE_LINES = """
 Dockerfile
 .dockerignore
 __pycache__/
+evals/
 """.strip()
 
 

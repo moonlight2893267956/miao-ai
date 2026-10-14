@@ -11,7 +11,11 @@ COPY requirements.txt* /app/
 RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -r requirements.txt; fi
 
 # 第三层：复制用户代码（变更最频繁，放在最后）
-COPY agent.py /app/agent.py
+# 必须整目录 COPY，不能只 COPY agent.py：agent 允许是**多文件包**
+# （如 agent.py + wubi/ + data/ + agent.yaml）。只拷入口会让 /app 缺包，容器启动即
+# ModuleNotFoundError 退出（健康检查失败 → 平台反复重建，表现为「agent 起不来」）。
+# 排除项由平台生成的 .dockerignore 负责（.venv / __pycache__ / *.zip / evals 等）。
+COPY . /app/
 
 EXPOSE 8080
 CMD ["python", "/app/miao_runner.py", "/app", "agent:invoke", "8080"]

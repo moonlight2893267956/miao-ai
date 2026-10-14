@@ -23,6 +23,11 @@
     SSE 解析新增 `event: conversation` 分支（此前未知事件会被当 token 拼进正文）
 
 ### Fixed
+- agent 镜像只 COPY 入口文件，**多文件 agent 起不来**：`backend/agent_templates/Dockerfile.template`
+  最后一层由 `COPY agent.py /app/agent.py` 改为 `COPY . /app/`，并让生成的 `.dockerignore` 排除
+  `evals/`。agent 拆成包之后（如 `wubi-explainer` 的 `agent.py + wubi/ + data/`）镜像里只有 `agent.py`，
+  启动即 `ModuleNotFoundError: No module named 'wubi'` 退出（exit 1）→ 健康检查失败 → 平台反复重建，
+  表现为「agent 起不来」（线上 wubi-explainer 即此症状）。修复后多文件 agent 上传即可用。
 - 流式输出（SSE）与多轮会话的两处断链：
   - 逐 token 流的 agent 原来无法把结构化结果交给平台 → 该轮在会话历史里 output 为空，
     下一轮追问会报「追问需要上下文」。新增收尾块约定 `yield {"output": {...}}`：runner 不当

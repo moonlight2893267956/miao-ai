@@ -54,6 +54,14 @@ export type AgentContract = {
     schema?: ContractProperty;
     display?: { primary?: string; secondary?: string[] };
   };
+  /**
+   * 多轮会话能力声明（可选）。只有 enabled: true 时平台才会把历史注入
+   * config.conversation；Try Run 的「多轮会话」开关据此决定是否可点。
+   */
+  conversation?: {
+    enabled?: boolean;
+    max_history_turns?: number;
+  };
 };
 
 export type AgentVersion = {
@@ -271,13 +279,32 @@ export const revokeKey = (name: string, keyId: string) =>
   http<void>(`/api/v1/agents/${name}/keys/${keyId}`, { method: "DELETE" });
 
 // ===== Invoke =====
+
+/** invoke 的 metadata：trace 三件套 + 可选的会话标识 */
+export type InvokeMetadata = {
+  user_id?: string;
+  session_id?: string;
+  tags?: string[];
+  /** 多轮会话标识（conv_xxx）。带上它平台才会记账并注入历史 */
+  conversation_id?: string;
+};
+
+/** 带会话调用时响应里才会出现的三个字段（+ injected_turns） */
+export type InvokeConversationFields = {
+  conversation_id?: string;
+  turn?: number;
+  history_truncated?: boolean;
+  /** 本轮实际注入给 agent 的轮次号；未声明多轮能力的 agent 为空数组 */
+  injected_turns?: number[];
+};
+
 export const invokeAgent = (
   name: string,
   apiKey: string,
   input: unknown,
-  metadata?: { user_id?: string; session_id?: string; tags?: string[] }
+  metadata?: InvokeMetadata
 ) =>
-  http<{ output: unknown; trace_id: string | null }>(
+  http<{ output: unknown; trace_id: string | null } & InvokeConversationFields>(
     `/api/v1/agents/${name}/invoke`,
     {
       method: "POST",
@@ -285,6 +312,54 @@ export const invokeAgent = (
       json: { input, metadata: metadata ?? {} },
     }
   );
+
+// ===== Conversations（多轮会话） =====
+
+export type ConversationTurn = {
+  index: number;
+  input: Record<string, unknown>;
+  output: Record<string, unknown> | null;
+  status: string;
+  trace_id: string | null;
+  created_at: string | null;
+};
+
+export type ConversationRead = {
+  conversation_id: string;
+  agent_name: string;
+  created_at: string;
+  expires_at: string | null;
+  turn_count: number;
+};
+
+export type ConversationDetail = ConversationRead & {
+  metadata?: Record<string, unknown> | null;
+  updated_at?: string | null;
+  turns: ConversationTurn[];
+};
+
+/** 新建会话（ttl_seconds 缺省 1 小时，上限 24 小时） */
+export const createConversation = (
+  name: string,
+  apiKey: string,
+  body?: { metadata?: Record<string, unknown>; ttl_seconds?: number }
+) =>
+  http<ConversationRead>(`/api/v1/agents/${name}/conversations`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}` },
+    json: body ?? {},
+  });
+
+export const getConversation = (name: string, apiKey: string, cid: string) =>
+  http<ConversationDetail>(`/api/v1/agents/${name}/conversations/${cid}`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+
+export const deleteConversation = (name: string, apiKey: string, cid: string) =>
+  http<void>(`/api/v1/agents/${name}/conversations/${cid}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
 
 export type StreamEvent = {
   event: string;
@@ -296,7 +371,7 @@ export async function* invokeAgentStream(
   name: string,
   apiKey: string,
   input: unknown,
-  metadata?: { user_id?: string; session_id?: string; tags?: string[] }
+  metadata?: InvokeMetadata
 ): AsyncGenerator<StreamEvent> {
   const r = await fetch(`${API_BASE}/api/v1/agents/${name}/invoke/stream`, {
     method: "POST",
@@ -343,7 +418,12 @@ export async function* invokeAgentStream(
             const doneData = JSON.parse(data);
             traceId = doneData.trace_id || undefined;
           } catch { /* ignore */ }
+          // done 的 payload 里可能带 output（逐 token 流的结构化收尾块，见 miao_runner）
           yield { event: "done", data, trace_id: traceId };
+        } else if (currentEvent === "conversation") {
+          // 带会话调用时平台补发的首条事件：轮次号 + 注入明细。
+          // 必须有这一支，否则会被下面的 else 当成 token 拼进正文。
+          yield { event: "conversation", data, trace_id: traceId };
         } else if (currentEvent === "error") {
           yield { event: "error", data };
         } else {

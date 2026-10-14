@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { AlertCircle, ArrowLeft, Play, Upload, KeyRound, Copy, Trash2, RefreshCw, Download, Loader2, CheckCircle2, Cpu, StopCircle, Sparkles } from "lucide-react";
+import { AlertCircle, ArrowLeft, Play, Upload, KeyRound, Copy, Trash2, RefreshCw, Download, Loader2, CheckCircle2, Cpu, StopCircle, Sparkles, MessagesSquare, RotateCcw } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,8 +20,10 @@ import {
   type LlmModel,
   activateAgent as apiActivateAgent,
   activateVersion,
+  createConversation,
   createKey,
   deleteAgent as apiDeleteAgent,
+  deleteConversation,
   downloadVersionArtifact,
   getAgent,
   invokeAgent,
@@ -39,6 +41,49 @@ const LANGFUSE_BASE = process.env.NEXT_PUBLIC_LANGFUSE_BASE_URL || "https://clou
 const LANGFUSE_PROJECT = process.env.NEXT_PUBLIC_LANGFUSE_PROJECT_ID || "";
 
 type DetailTab = "versions" | "keys" | "tryrun";
+
+/**
+ * Try Run 的一轮（仅在「多轮会话」开启时使用）。
+ * 非会话模式下输出区仍是单块 Output，行为与本功能上线前完全一致。
+ */
+type TryTurn = {
+  /** 本地 id：流式过程中靠它定位要更新的那一轮 */
+  key: string;
+  /** 平台回传的会话内轮次号（从 1 开始）；流式下由 conversation 事件给出 */
+  turn?: number;
+  input: string;
+  output: string | null;
+  rawOutput: unknown;
+  status: "running" | "succeeded" | "failed";
+  traceId: string | null;
+  /** 本轮平台实际注入给 agent 的轮次号（空 = 没有注入历史） */
+  injectedTurns: number[];
+  historyTruncated: boolean;
+  error?: string | null;
+};
+
+function tryTurnStatusText(status: TryTurn["status"]): string {
+  if (status === "running") return "进行中";
+  return status === "succeeded" ? "成功" : "失败";
+}
+
+function shortConversationId(cid: string): string {
+  return cid.length > 20 ? `${cid.slice(0, 14)}…${cid.slice(-4)}` : cid;
+}
+
+/** 把一条 SSE 数据转成要追加到正文的文本（与改造前的展示逻辑保持一致） */
+function streamEventText(event: string, data: string): string {
+  try {
+    const parsed = JSON.parse(data);
+    if (typeof parsed === "string") return parsed;
+    if (event === "output") {
+      return parsed.answer ?? parsed.output ?? JSON.stringify(parsed, null, 2);
+    }
+    return parsed.token ?? parsed.content ?? parsed.text ?? JSON.stringify(parsed);
+  } catch {
+    return data;
+  }
+}
 
 export default function AgentDetailPage() {
   const params = useParams<{ name: string }>();
@@ -238,10 +283,24 @@ export default function AgentDetailPage() {
   const [tryMode, setTryMode] = useState<"form" | "json">("form");
   const [tryExample, setTryExample] = useState("-1");
 
+  // ===== 多轮会话（Try Run）=====
+  const [tryTurns, setTryTurns] = useState<TryTurn[]>([]);
+  const [tryConversationOn, setTryConversationOn] = useState(false);
+  /** 当前会话 id；为 null 表示下一轮 Run 时惰性新建 */
+  const [tryConversationId, setTryConversationId] = useState<string | null>(null);
+  const [tryConvNotice, setTryConvNotice] = useState<string | null>(null);
+
   /** 生效契约：取当前激活版本的声明。没有契约（存量 agent）→ 全部走旧的 JSON 模式 */
   const activeContract = versions.find((v) => v.is_active)?.contract ?? null;
   const examples = activeContract?.input?.examples ?? [];
   const inputSchema = activeContract?.input?.schema;
+
+  /**
+   * 该 agent 是否声明了多轮能力。
+   * 未声明时平台只记账、不注入历史，因此开关置灰并给出提示，避免「以为 agent 看得见上下文」。
+   */
+  const conversationCapable = Boolean(activeContract?.conversation?.enabled);
+  const conversationActive = tryConversationOn && conversationCapable;
 
   /** 表单与 JSON 共用一个数据源：都是这段 JSON 文本 */
   const formValue = useMemo<Record<string, unknown>>(() => {
@@ -274,6 +333,71 @@ export default function AgentDetailPage() {
     setTryError(null);
   }
 
+  function onToggleConversation(next: boolean) {
+    setTryConversationOn(next);
+    setTryError(null);
+    if (next) {
+      setTryConvNotice(null);
+      return;
+    }
+    // 关闭 = 停用当前会话（不删除服务端会话，避免误删想留的历史）
+    setTryConversationId(null);
+    setTryTurns([]);
+    setTryConvNotice("已关闭多轮：下一轮不再携带会话");
+  }
+
+  function onApiKeyChange(next: string) {
+    setTryKey(next);
+    if (tryConversationId) {
+      // 会话归属创建它的 API Key，换 key 必然 403，直接重置
+      setTryConversationId(null);
+      setTryTurns([]);
+      setTryConvNotice("已切换 API Key，会话已重置");
+    }
+  }
+
+  async function onResetConversation() {
+    const cid = tryConversationId;
+    setTryConversationId(null);
+    setTryTurns([]);
+    setTryError(null);
+    setTryConvNotice("已重置，下一轮会新建会话");
+    if (cid && tryKey) {
+      try {
+        await deleteConversation(name, tryKey, cid);
+      } catch {
+        // 删除失败不影响继续用：会话有 TTL，过期后自然不可用
+      }
+    }
+  }
+
+  /** 会话类失败的友好提示 + 本地善后（坏掉的 conversation_id 不能留到下一轮） */
+  function conversationFailureHint(message: string): string | null {
+    if (message.startsWith("410")) {
+      setTryConversationId(null);
+      setTryConvNotice("会话已过期，已自动重置：下一轮会新建会话");
+      return "会话已过期（410）：已自动重置，下一轮会新建会话";
+    }
+    if (message.startsWith("409")) {
+      return "上一轮还在跑（409）：同一会话同时只能有一轮，稍等再试";
+    }
+    if (message.startsWith("403")) {
+      setTryConversationId(null);
+      setTryTurns([]);
+      setTryConvNotice("会话不属于当前 API Key，已自动重置");
+      return "会话归属不符（403）：已重置，下一轮会新建会话";
+    }
+    if (message.startsWith("404")) {
+      setTryConversationId(null);
+      setTryConvNotice("会话不存在，已自动重置");
+      return "会话不存在（404）：已重置，下一轮会新建会话";
+    }
+    if (message.startsWith("429") && message.includes("max turns")) {
+      return "会话轮次已达上限（429）：点「重置」新建一个会话";
+    }
+    return null;
+  }
+
   async function onTryRun() {
     if (!tryKey) {
       setTryError("需要 API Key（颁发一个或粘贴现有的）");
@@ -286,67 +410,160 @@ export default function AgentDetailPage() {
       setTryError("Input 不是合法 JSON");
       return;
     }
+    const useConversation = conversationActive;
     setTryBusy(true);
-    setTryOutput(null);
-    setTryRawOutput(undefined);
     setTryError(null);
-    setTryTrace(null);
+    setTryConvNotice(null);
+    if (!useConversation) {
+      // 非会话模式：行为与改造前一致（单块 Output，每次覆盖）
+      setTryOutput(null);
+      setTryRawOutput(undefined);
+      setTryTrace(null);
+    }
+
+    // 会话模式：惰性新建会话（第一次 Run 才建，避免点开开关就产生空会话）
+    let conversationId = useConversation ? tryConversationId : null;
+    let turnKey: string | null = null;
+    if (useConversation) {
+      if (!conversationId) {
+        try {
+          const created = await createConversation(name, tryKey);
+          conversationId = created.conversation_id;
+          setTryConversationId(conversationId);
+        } catch (e) {
+          setTryError(`新建会话失败：${(e as Error).message}`);
+          setTryBusy(false);
+          return;
+        }
+      }
+      turnKey = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+      const key = turnKey;
+      setTryTurns((prev) => [
+        ...prev,
+        {
+          key,
+          input: tryInput,
+          output: null,
+          rawOutput: undefined,
+          status: "running",
+          traceId: null,
+          injectedTurns: [],
+          historyTruncated: false,
+        },
+      ]);
+    }
+    const currentTurnKey = turnKey;
+    const patchTurn = (patch: Partial<TryTurn>) => {
+      if (!currentTurnKey) return;
+      setTryTurns((prev) =>
+        prev.map((t) => (t.key === currentTurnKey ? { ...t, ...patch } : t))
+      );
+    };
 
     try {
       if (tryStream) {
         const chunks: string[] = [];
-        for await (const evt of invokeAgentStream(name, tryKey, input)) {
+        let traceId: string | null = null;
+        let raw: unknown = undefined;
+        let meta: { turn?: number; injected_turns?: number[]; history_truncated?: boolean } = {};
+        for await (const evt of invokeAgentStream(
+          name,
+          tryKey,
+          input,
+          conversationId ? { conversation_id: conversationId } : undefined
+        )) {
+          if (evt.event === "conversation") {
+            // 平台补发的首条事件：轮次号 + 注入明细
+            try {
+              const parsed = JSON.parse(evt.data);
+              meta = parsed;
+              if (parsed.conversation_id) setTryConversationId(parsed.conversation_id);
+            } catch { /* ignore */ }
+            patchTurn({
+              turn: meta.turn,
+              injectedTurns: meta.injected_turns ?? [],
+              historyTruncated: Boolean(meta.history_truncated),
+            });
+            continue;
+          }
           if (evt.event === "error") {
             let msg = evt.data;
             try { msg = JSON.parse(evt.data).message; } catch { /* use raw */ }
+            patchTurn({ status: "failed", error: String(msg) });
             setTryError(String(msg));
             break;
           }
           if (evt.event === "done") {
+            let doneData: Record<string, unknown> | null = null;
             try {
-              const doneData = JSON.parse(evt.data);
-              if (doneData.trace_id) setTryTrace(doneData.trace_id);
+              doneData = JSON.parse(evt.data);
             } catch { /* ignore */ }
-            // 流式 agent 把整个 output JSON 逐段吐出来：拼完能解析就用于结构化展示
-            try {
-              setTryRawOutput(JSON.parse(chunks.join("")));
-            } catch { /* 拼起来不是完整 JSON 就保持文本展示 */ }
+            if (doneData?.trace_id) traceId = String(doneData.trace_id);
+            if (doneData && "output" in doneData) {
+              // 逐 token 流的 agent 把结构化结果随 done 下发（见 miao_runner 的流式约定）
+              raw = doneData.output;
+            } else {
+              // 兜底：agent 把整个 output JSON 逐段吐出来时，拼完能解析就用于结构化展示
+              try {
+                raw = JSON.parse(chunks.join(""));
+              } catch { /* 拼起来不是完整 JSON 就保持文本展示 */ }
+            }
             break;
           }
-          if (evt.event === "output") {
-            try {
-              const parsed = JSON.parse(evt.data);
-              const text = typeof parsed === "string" ? parsed
-                : parsed.answer ?? parsed.output ?? JSON.stringify(parsed, null, 2);
-              chunks.push(text);
-              setTryOutput(chunks.join(""));
-            } catch {
-              chunks.push(evt.data);
-              setTryOutput(chunks.join(""));
-            }
+          chunks.push(streamEventText(evt.event, evt.data));
+          if (currentTurnKey) {
+            patchTurn({ output: chunks.join("") });
           } else {
-            try {
-              const parsed = JSON.parse(evt.data);
-              const text = typeof parsed === "string" ? parsed
-                : parsed.token ?? parsed.content ?? parsed.text ?? JSON.stringify(parsed);
-              chunks.push(text);
-              setTryOutput(chunks.join(""));
-            } catch {
-              chunks.push(evt.data);
-              setTryOutput(chunks.join(""));
-            }
+            setTryOutput(chunks.join(""));
           }
         }
+        if (currentTurnKey) {
+          patchTurn({
+            status: "succeeded",
+            output: chunks.join("") || null,
+            rawOutput: raw,
+            traceId,
+            turn: meta.turn,
+            injectedTurns: meta.injected_turns ?? [],
+            historyTruncated: Boolean(meta.history_truncated),
+          });
+        } else {
+          setTryTrace(traceId);
+          setTryRawOutput(raw);
+          setTryOutput(chunks.join("") || null);
+        }
       } else {
-        const r = await invokeAgent(name, tryKey, input);
+        const r = await invokeAgent(
+          name,
+          tryKey,
+          input,
+          conversationId ? { conversation_id: conversationId } : undefined
+        );
         const output = r.output as Record<string, unknown>;
         const text = output?.answer ?? output?.output ?? JSON.stringify(r.output, null, 2);
-        setTryOutput(String(text));
-        setTryRawOutput(r.output);
-        setTryTrace(r.trace_id);
+        if (currentTurnKey) {
+          patchTurn({
+            status: "succeeded",
+            output: String(text),
+            rawOutput: r.output,
+            traceId: r.trace_id,
+            turn: r.turn,
+            injectedTurns: r.injected_turns ?? [],
+            historyTruncated: Boolean(r.history_truncated),
+          });
+        } else {
+          setTryOutput(String(text));
+          setTryRawOutput(r.output);
+          setTryTrace(r.trace_id);
+        }
       }
     } catch (e) {
-      setTryError((e as Error).message);
+      const message = (e as Error).message;
+      const hint = useConversation ? conversationFailureHint(message) : null;
+      if (currentTurnKey) {
+        patchTurn({ status: "failed", error: hint ?? message });
+      }
+      setTryError(hint ?? message);
     } finally {
       setTryBusy(false);
     }
@@ -733,7 +950,11 @@ export default function AgentDetailPage() {
                 </h2>
                 <p className="detail-panel-desc">
                   {activeContract
-                    ? "按契约表单填字段，或切到 JSON 手写；两种模式内容互通"
+                    ? `按契约表单填字段，或切到 JSON 手写；两种模式内容互通${
+                        conversationCapable
+                          ? "。勾选「多轮会话」可在同一会话内连续追问，平台会把历史注入 agent"
+                          : ""
+                      }`
                     : "用 API Key 直接调用 /invoke，支持普通和 SSE 流式两种模式"}
                 </p>
               </div>
@@ -798,10 +1019,63 @@ export default function AgentDetailPage() {
                   id="trykey"
                   type="password"
                   value={tryKey}
-                  onChange={(e) => setTryKey(e.target.value)}
+                  onChange={(e) => onApiKeyChange(e.target.value)}
                   placeholder="miao_sk_..."
                 />
               </div>
+
+              {/* 多轮会话：开关 + 会话状态。未声明能力的 agent 置灰，避免误以为能带上下文 */}
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                <label
+                  className={`toggle-label ${conversationCapable ? "" : "cursor-not-allowed opacity-60"}`}
+                  title={
+                    conversationCapable
+                      ? "同一次会话内连续调用，平台会把历史注入 agent"
+                      : "该 agent 未声明多轮能力：平台只记账，不会把历史注入 agent"
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    checked={conversationActive}
+                    disabled={!conversationCapable}
+                    onChange={(e) => onToggleConversation(e.target.checked)}
+                  />
+                  <MessagesSquare className="h-4 w-4" />
+                  多轮会话
+                </label>
+                {conversationActive ? (
+                  <span className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--color-text-secondary)]">
+                    <span className="font-mono">
+                      {tryConversationId
+                        ? shortConversationId(tryConversationId)
+                        : "尚未创建（Run 时自动新建）"}
+                    </span>
+                    {tryTurns.length > 0 && <span>已 {tryTurns.length} 轮</span>}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={onResetConversation}
+                      disabled={tryBusy}
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" />
+                      重置
+                    </Button>
+                  </span>
+                ) : (
+                  !conversationCapable && (
+                    <span className="text-xs text-[var(--color-text-secondary)]">
+                      该 agent 未声明多轮能力（agent.yaml 的 conversation.enabled: true）
+                    </span>
+                  )
+                )}
+              </div>
+
+              {tryConvNotice && (
+                <div className="rounded-[var(--radius-md)] bg-[var(--color-info-bg)] px-3 py-2 text-xs text-[var(--color-info-text)]">
+                  {tryConvNotice}
+                </div>
+              )}
               {activeContract && tryMode === "form" && inputSchema ? (
                 <div className="space-y-1.5">
                   <Label>Input（按契约填写）</Label>
@@ -845,7 +1119,8 @@ export default function AgentDetailPage() {
                 </div>
               )}
 
-              {tryOutput && (
+              {/* 非会话模式：单块 Output（与本功能上线前完全一致） */}
+              {!conversationActive && tryOutput && (
                 <div className="space-y-2">
                   <Label>Output</Label>
                   {activeContract && tryRawOutput !== undefined && hasDisplayConfig(activeContract) ? (
@@ -874,6 +1149,82 @@ export default function AgentDetailPage() {
                       </span>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* 会话模式：按轮累积，最新在上 */}
+              {conversationActive && tryTurns.length > 0 && (
+                <div className="space-y-2">
+                  <Label>轮次（最新在上）</Label>
+                  {[...tryTurns].reverse().map((turn) => (
+                    <div
+                      key={turn.key}
+                      className="space-y-2 rounded-[var(--radius-md)] border border-[var(--color-border-default)] bg-[var(--color-surface-primary)] p-3"
+                    >
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--color-text-secondary)]">
+                        <span className="font-medium text-[var(--color-text-primary)]">
+                          {turn.turn ? `第 ${turn.turn} 轮` : "本轮"}
+                        </span>
+                        <span
+                          className={
+                            turn.status === "failed"
+                              ? "text-[var(--color-error-text)]"
+                              : turn.status === "running"
+                                ? "text-[var(--color-warning-text)]"
+                                : "text-[var(--color-success-text)]"
+                          }
+                        >
+                          {tryTurnStatusText(turn.status)}
+                        </span>
+                        <span
+                          title={
+                            turn.injectedTurns.length > 0
+                              ? `本轮 agent 实际看到的历史轮次：${turn.injectedTurns.join(", ")}`
+                              : "本轮没有注入历史（首轮，或该 agent 未声明多轮能力）"
+                          }
+                        >
+                          注入历史：
+                          {turn.injectedTurns.length > 0
+                            ? turn.injectedTurns.map((i) => `#${i}`).join(" ")
+                            : "无"}
+                        </span>
+                        {turn.historyTruncated && (
+                          <span className="text-[var(--color-warning-text)]">已裁剪</span>
+                        )}
+                        {turn.traceId && (
+                          <a
+                            href={`${LANGFUSE_BASE}/project/${LANGFUSE_PROJECT}/traces/${turn.traceId}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="font-mono text-[var(--color-brand)] underline"
+                          >
+                            trace
+                          </a>
+                        )}
+                      </div>
+                      <details>
+                        <summary className="cursor-pointer text-xs text-[var(--color-text-secondary)]">
+                          本轮入参
+                        </summary>
+                        <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs text-[var(--color-text-secondary)]">
+                          {turn.input}
+                        </pre>
+                      </details>
+                      {turn.error ? (
+                        <div className="alert alert-error text-xs">{turn.error}</div>
+                      ) : activeContract && turn.rawOutput !== undefined && hasDisplayConfig(activeContract) ? (
+                        <ContractOutput output={turn.rawOutput} contract={activeContract} />
+                      ) : (
+                        <div
+                          className={`code-block ${
+                            turn.status === "running" ? "streaming" : ""
+                          }`}
+                        >
+                          {turn.output ?? ""}
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
               )}
             </div>

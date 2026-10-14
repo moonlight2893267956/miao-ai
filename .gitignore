@@ -37,3 +37,9 @@ agents-runtime/
 
 # WorkBuddy 本地工具元数据
 .workbuddy/
+
+# CodeBuddy 本地工具元数据（计划文件等，语义同 .workbuddy/）
+.codebuddy/
+
+# Agent 打包产物（zip -r 产出，勿入库）
+demos/**/*.zip

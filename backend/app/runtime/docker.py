@@ -14,6 +14,12 @@ from .process import find_free_port, wait_for_health
 log = logging.getLogger(__name__)
 
 DOCKERFILE_TEMPLATE = Path(__file__).parents[2] / "agent_templates" / "Dockerfile.template"
+#: 平台注入 agent 目录的运行时文件：runner + agent SDK（执行过程上报）
+#: 两者都放在 agent_dir 根部，由 Dockerfile 的 `COPY miao_runner.py miao_sdk.py /app/`
+#: 带进镜像；agent 目录里同名文件会被平台版本覆盖（平台文件是运行时的一部分，
+#: 不由 agent 作者维护）。
+_RUNNER_FILENAME = "miao_runner.py"
+_SDK_FILENAME = "miao_sdk.py"
 
 # 需要排除的文件/目录（不进入 Docker 镜像）
 # 注意：模板最后一层是 `COPY . /app/`（支持多文件 agent 包），所以这里要排除
@@ -56,6 +62,29 @@ def image_exists(image_tag: str) -> bool:
         return False
 
 
+def sync_runtime_files(agent_dir: Path, runner_path: Path) -> None:
+    """把平台运行时文件（runner + agent SDK）复制进 agent 目录。
+
+    **为什么两个文件都要拷**：docker 模式镜像里第一层就 `COPY miao_runner.py
+    miao_sdk.py /app/`，而脚本模式下 ``sys.path[0]`` 正是 runner 所在目录 ——
+    agent 靠它 `import miao_sdk`。少拷 SDK 不会让 agent 起不来（runner 是软导入），
+    但所有 agent 的执行事件上报会静默失效，且极难发现，所以在打包这一步就保证成对出现。
+
+    只在内容不同时写入：命中相同内容时不改 mtime，避免每次激活都让 Docker 层缓存失效。
+    """
+    for filename in (_RUNNER_FILENAME, _SDK_FILENAME):
+        source = runner_path.parent / filename
+        if not source.exists():
+            # SDK 缺失只告警不阻断：agent 仍可运行，只是没有执行事件上报
+            if filename == _SDK_FILENAME:
+                log.warning("runtime.sdk.missing path=%s", source)
+                continue
+            source = runner_path
+        dest = agent_dir / filename
+        if not dest.exists() or dest.read_text() != source.read_text():
+            shutil.copy2(source, dest)
+
+
 def build_dockerfile(agent_dir: Path, runner_path: Path, env_vars: dict | None = None) -> Path:
     """基于模板生成 Dockerfile 到 agent_dir，并生成 .dockerignore。
 
@@ -70,10 +99,8 @@ def build_dockerfile(agent_dir: Path, runner_path: Path, env_vars: dict | None =
     dockerfile_path = agent_dir / "Dockerfile"
     dockerfile_path.write_text(template)
 
-    # 把 runner 复制到 agent_dir 供 Docker COPY
-    runner_dest = agent_dir / "miao_runner.py"
-    if not runner_dest.exists() or runner_dest.read_text() != runner_path.read_text():
-        shutil.copy2(runner_path, runner_dest)
+    # 把 runner 与 agent SDK 复制到 agent_dir 供 Docker COPY
+    sync_runtime_files(agent_dir, runner_path)
     return dockerfile_path
 
 

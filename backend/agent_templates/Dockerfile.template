@@ -2,7 +2,10 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # 第一层：安装 runner 的固定依赖（变化少，可缓存）
-COPY miao_runner.py /app/miao_runner.py
+# miao_sdk.py 是**平台提供的 agent SDK**（执行事件上报），放在 runner 同目录：
+# 脚本模式下 sys.path[0] 正是这里，所以任何 agent 都能 `import miao_sdk`，
+# 不需要把它打进自己的 zip，也不需要写进 requirements.txt。
+COPY miao_runner.py miao_sdk.py /app/
 RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com \
     fastapi uvicorn pydantic langfuse
 

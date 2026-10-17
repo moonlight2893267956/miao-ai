@@ -60,7 +60,285 @@ type TryTurn = {
   injectedTurns: number[];
   historyTruncated: boolean;
   error?: string | null;
+  /**
+   * 本轮的执行事件（`event: exec`）。
+   *
+   * agent 上报的「调了哪些工具、结果如何、耗时多久」。它是**辅助信息**：
+   * 不属于正文，也不参与结果解析 —— 这里必须单独接住，否则未知事件会被
+   * `streamEventText` 的兜底 `JSON.stringify` 拼进打字机正文（见下方循环）。
+   */
+  execEvents?: ExecEvent[];
 };
+
+/**
+ * 一条执行事件（与后端 `miao_sdk` 的事件字段一一对应）。
+ *
+ * 平台不定义语义：只有 `kind` 是必有的，其余字段全部可能缺席或未知。
+ * 渲染时必须容忍未知 `kind`（降级成通用条目），绝不能让新事件类型把界面弄崩。
+ */
+export type ExecEvent = {
+  /** 事件类型（平台不校验取值，agent 可自定义） */
+  kind: string;
+  /** 每条流内单调递增的序号，可用于发现缺口 */
+  seq?: number;
+  /** thinking / log 的文本 */
+  text?: string;
+  /** log 的级别（info / warn / error，自由取值） */
+  level?: string;
+  /** 工具调用的配对键 */
+  call_id?: string;
+  /** 工具名 */
+  name?: string;
+  /** 工具入参（对象） */
+  input?: unknown;
+  /** 工具是否成功 */
+  ok?: boolean;
+  /** 工具出参（对象） */
+  output?: unknown;
+  /** 工具失败原因 */
+  error?: string;
+  /** 耗时（毫秒） */
+  ms?: number;
+  /** 字段被体积上限截断的标记 */
+  truncated?: boolean;
+};
+
+/**
+ * 归一化一条 exec 事件：**未知字段一律忽略、未知 kind 降级**，绝不抛错。
+ *
+ * 契约只保证「只增不改」，所以这里必须容忍未来新增的字段与类型。
+ */
+function parseExecEvent(data: string): ExecEvent | null {
+  try {
+    const parsed = JSON.parse(data) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object") return null;
+    const kind = typeof parsed.kind === "string" ? parsed.kind : "";
+    if (!kind) return null; // 没有 kind 无法归类
+    return {
+      kind,
+      seq: typeof parsed.seq === "number" ? parsed.seq : undefined,
+      text: typeof parsed.text === "string" ? parsed.text : undefined,
+      level: typeof parsed.level === "string" ? parsed.level : undefined,
+      call_id: typeof parsed.call_id === "string" ? parsed.call_id : undefined,
+      name: typeof parsed.name === "string" ? parsed.name : undefined,
+      input: parsed.input,
+      ok: typeof parsed.ok === "boolean" ? parsed.ok : undefined,
+      output: parsed.output,
+      error: typeof parsed.error === "string" ? parsed.error : undefined,
+      ms: typeof parsed.ms === "number" ? parsed.ms : undefined,
+      truncated: parsed.truncated === true ? true : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 把任意出参压成一行短摘要（工具出参可能很大，这里只做提示） */
+function summarizePayload(value: unknown, maxLength = 80): string {
+  if (value === undefined || value === null) return "";
+  let text: string;
+  try {
+    text = typeof value === "string" ? value : JSON.stringify(value);
+  } catch {
+    text = String(value);
+  }
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+/**
+ * 把「tool_call / tool_result」按 call_id 折叠成一次调用。
+ *
+ * 一个工具调用在协议里是**两条事件**（call 与 result 配对）——界面上不该是两行。
+ * 没等到 result 的调用显示为「进行中」，这正是等待期最需要看到的状态。
+ */
+type ToolRun = {
+  callId: string;
+  name: string;
+  input?: unknown;
+  /** 还没等到配对的结果 */
+  pending: boolean;
+  ok?: boolean;
+  output?: unknown;
+  error?: string;
+  ms?: number;
+  truncated?: boolean;
+};
+
+/** 把执行事件流按展示需求整理成「工具调用（已配对）」与「其它事件（原样）」 */
+function groupExecEvents(events: ExecEvent[]): {
+  tools: ToolRun[];
+  others: ExecEvent[];
+} {
+  const tools: ToolRun[] = [];
+  const byCallId = new Map<string, ToolRun>();
+  const others: ExecEvent[] = [];
+
+  for (const event of events) {
+    if (event.kind === "tool_call" && event.call_id) {
+      const run: ToolRun = {
+        callId: event.call_id,
+        name: event.name ?? "unknown",
+        input: event.input,
+        pending: true,
+      };
+      tools.push(run);
+      byCallId.set(event.call_id, run);
+      continue;
+    }
+    if (event.kind === "tool_result" && event.call_id) {
+      const run = byCallId.get(event.call_id);
+      if (run) {
+        run.pending = false;
+        run.ok = event.ok;
+        run.output = event.output;
+        run.error = event.error;
+        run.ms = event.ms;
+        run.truncated = event.truncated;
+      } else {
+        // 只收到 result（丢了 call）也别丢信息：当成一次已完成调用显示
+        const orphan: ToolRun = {
+          callId: event.call_id,
+          name: event.name ?? "unknown",
+          pending: false,
+          ok: event.ok,
+          output: event.output,
+          error: event.error,
+          ms: event.ms,
+          truncated: event.truncated,
+        };
+        tools.push(orphan);
+        byCallId.set(event.call_id, orphan);
+      }
+      continue;
+    }
+    others.push(event); // thinking / log / 自定义 kind
+  }
+
+  return { tools, others };
+}
+
+function toolStatusIcon(run: ToolRun): string {
+  if (run.pending) return "•";
+  // ok 缺失时不假装成功：契约里 ok 是可选的，缺失就如实显示「未知」
+  if (run.ok === undefined) return "?";
+  return run.ok ? "✓" : "✕";
+}
+
+function toolStatusClass(run: ToolRun): string {
+  if (run.pending) return "text-[var(--color-brand)]";
+  if (run.ok === undefined) return "text-[var(--color-text-secondary)]";
+  return run.ok
+    ? "text-[var(--color-text-secondary)]"
+    : "text-[var(--color-danger-text)]";
+}
+
+function logLevelClass(level?: string): string {
+  if (level === "error") return "text-[var(--color-danger-text)]";
+  if (level === "warn") return "text-[var(--color-warning-text)]";
+  return "text-[var(--color-text-secondary)]";
+}
+
+/**
+ * 执行轨（Try Run 用）。
+ *
+ * 与 coding agent 的展示一致：**一行一次操作**。
+ *   · 工具调用按 call_id 折叠，显示 名称 / 耗时 / 成败 / 出参摘要；未配对时显示为进行中
+ *   · log 按级别着色，如实显示降级与失败
+ *   · thinking 用引用样式，与执行事实区分开
+ *   · 未知 kind 降级成通用条目（不隐藏，也不假装理解）
+ */
+function ExecTrace({ events }: { events: ExecEvent[] }) {
+  const { tools, others } = groupExecEvents(events);
+  const hasPending = tools.some((t) => t.pending);
+
+  /*
+   * 展开状态必须自己管，不能用 `<details open={hasPending}>`。
+   *
+   * 那个写法在流式期间是展开的，但结果一到达 `hasPending` 变 false，React 就会
+   * 移除 open 属性 —— 面板**恰好在出结果的那一刻自动收起**，用户只看到一行标题，
+   * 观感等同于「没有展示执行过程」。而这里恰恰是最该让用户看见结果的时刻。
+   *
+   * 所以：一旦展开过就保持展开（只增不减），用户手动折叠仍按浏览器的 defaultPrevented 逻辑走。
+   */
+  const [open, setOpen] = useState(hasPending);
+  const openedOnce = useRef(false);
+  useEffect(() => {
+    if (hasPending && !openedOnce.current) {
+      openedOnce.current = true;
+      setOpen(true);
+    }
+  }, [hasPending]);
+
+  return (
+    <details
+      className="mt-1"
+      open={open}
+      onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
+    >
+      <summary className="cursor-pointer text-xs text-[var(--color-text-secondary)]">
+        执行过程（{tools.length} 次工具调用
+        {others.length > 0 ? `，${others.length} 条其它事件` : ""}）
+      </summary>
+      <ul className="mt-1 space-y-0.5 font-mono text-xs">
+        {tools.map((run) => (
+          <li key={run.callId} className="flex items-baseline gap-1.5">
+            <span aria-hidden="true" className={toolStatusClass(run)}>
+              {toolStatusIcon(run)}
+            </span>
+            <span className={toolStatusClass(run)}>{run.name}</span>
+            {typeof run.ms === "number" && (
+              <span className="text-[var(--color-text-secondary)]">{run.ms}ms</span>
+            )}
+            {run.input !== undefined && (
+              <span className="truncate text-[var(--color-text-secondary)]" title={summarizePayload(run.input, 400)}>
+                入参 {summarizePayload(run.input, 40)}
+              </span>
+            )}
+            {run.ok === false && run.error && (
+              <span className="text-[var(--color-danger-text)]" title={run.error}>
+                {summarizePayload(run.error, 60)}
+              </span>
+            )}
+            {run.ok !== false && run.output !== undefined && (
+              <span className="truncate text-[var(--color-text-secondary)]" title={summarizePayload(run.output, 400)}>
+                → {summarizePayload(run.output, 60)}
+              </span>
+            )}
+            {run.truncated && (
+              <span className="text-[var(--color-text-secondary)]">（已截断）</span>
+            )}
+          </li>
+        ))}
+        {others.map((event, index) => {
+          /*
+           * thinking 与 log / 未知 kind 必须**分开呈现**：
+           *   · thinking 是**模型内容**（可能有错、可能不完整），用引用样式并明确标注，
+           *     避免用户把它当成执行事实；
+           *   · log 是执行说明，按级别着色；
+           *   · 未知 kind 降级成通用条目（不隐藏，也不假装理解它）。
+           * 三者混用同一套样式就等于在暗示「模型说的 = 执行事实」，这是我们不做的。
+           */
+          const isThinking = event.kind === "thinking";
+          const tone = isThinking ? "text-[var(--color-text-secondary)] italic" : logLevelClass(event.level);
+          return (
+            <li key={`${event.kind}-${event.seq ?? index}`} className="flex items-baseline gap-1.5">
+              <span aria-hidden="true" className={tone}>{isThinking ? "“" : "·"}</span>
+              <span className={tone}>{isThinking ? "思考" : event.kind}</span>
+              {event.text && (
+                <span className={`truncate ${tone}`} title={event.text}>
+                  {event.text}
+                </span>
+              )}
+              {event.truncated && (
+                <span className="text-[var(--color-text-secondary)]">（已截断）</span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </details>
+  );
+}
 
 function tryTurnStatusText(status: TryTurn["status"]): string {
   if (status === "running") return "进行中";
@@ -277,6 +555,8 @@ export default function AgentDetailPage() {
   const [tryRawOutput, setTryRawOutput] = useState<unknown>(undefined);
   const [tryError, setTryError] = useState<string | null>(null);
   const [tryTrace, setTryTrace] = useState<string | null>(null);
+  /** 非会话模式的执行过程（会话模式下进度挂在各轮 turn 上） */
+  const [tryExecEvents, setTryExecEvents] = useState<ExecEvent[]>([]);
   const [tryBusy, setTryBusy] = useState(false);
   const [tryStream, setTryStream] = useState(false);
   // 有契约时默认「表单模式」；无契约的 agent 只有 JSON 模式，界面与历史版本一致
@@ -419,6 +699,7 @@ export default function AgentDetailPage() {
       setTryOutput(null);
       setTryRawOutput(undefined);
       setTryTrace(null);
+      setTryExecEvents([]);
     }
 
     // 会话模式：惰性新建会话（第一次 Run 才建，避免点开开关就产生空会话）
@@ -466,6 +747,8 @@ export default function AgentDetailPage() {
         let traceId: string | null = null;
         let raw: unknown = undefined;
         let meta: { turn?: number; injected_turns?: number[]; history_truncated?: boolean } = {};
+        // 本轮的执行事件（`event: exec`）；非会话模式下也照样收集
+        let execEvents: ExecEvent[] = [];
         for await (const evt of invokeAgentStream(
           name,
           tryKey,
@@ -509,6 +792,26 @@ export default function AgentDetailPage() {
               } catch { /* 拼起来不是完整 JSON 就保持文本展示 */ }
             }
             break;
+          }
+          /*
+           * 执行事件：**不能落进 chunks**。
+           *
+           * `streamEventText` 的兜底是 JSON.stringify(parsed)，未知事件会被原样拼进
+           * 打字机正文 —— 试跑界面就会出现一坨 {"kind":"tool_call",...} 的明文。
+           * 执行事件是辅助信息（见 docs/agent-sdk.md），这里单独接住并渲染成「执行过程」。
+           */
+          if (evt.event === "exec") {
+            const event = parseExecEvent(evt.data);
+            if (event) {
+              const nextEvents = [...execEvents, event];
+              execEvents = nextEvents;
+              if (currentTurnKey) {
+                patchTurn({ execEvents: nextEvents });
+              } else {
+                setTryExecEvents(nextEvents);
+              }
+            }
+            continue;
           }
           chunks.push(streamEventText(evt.event, evt.data));
           if (currentTurnKey) {
@@ -1119,9 +1422,15 @@ export default function AgentDetailPage() {
                 </div>
               )}
 
-              {/* 非会话模式：单块 Output（与本功能上线前完全一致） */}
-              {!conversationActive && tryOutput && (
+              {/*
+                非会话模式：单块 Output（与本功能上线前完全一致）。
+                条件是 `tryOutput || 有过程事件` —— 等待期还没有任何 token（tryOutput 为空串），
+                若只判 tryOutput，过程信息会在**最需要它的时刻**被隐藏。
+              */}
+              {!conversationActive && (tryOutput || tryExecEvents.length > 0) && (
                 <div className="space-y-2">
+                  {/* 执行过程（`event: exec`）：等待期就能看到 agent 调了哪个工具、结果如何 */}
+                  {tryExecEvents.length > 0 && <ExecTrace events={tryExecEvents} />}
                   <Label>Output</Label>
                   {activeContract && tryRawOutput !== undefined && hasDisplayConfig(activeContract) ? (
                     <ContractOutput output={tryRawOutput} contract={activeContract} />
@@ -1210,6 +1519,9 @@ export default function AgentDetailPage() {
                           {turn.input}
                         </pre>
                       </details>
+                      {turn.execEvents && turn.execEvents.length > 0 && (
+                        <ExecTrace events={turn.execEvents} />
+                      )}
                       {turn.error ? (
                         <div className="alert alert-error text-xs">{turn.error}</div>
                       ) : activeContract && turn.rawOutput !== undefined && hasDisplayConfig(activeContract) ? (

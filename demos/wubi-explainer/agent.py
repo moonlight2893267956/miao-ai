@@ -47,6 +47,24 @@ agent 自身仍然无状态。两种用法：
 最后 ``yield {"output": result}`` 给出结构化结果（平台随 done 事件记录该轮 output）。
 非流式时返回完整 dict，行为与以前完全一致。
 
+执行事件上报（平台通用能力，本 agent 是首个消费者）
+---------------------------------------------------
+联网检索 4~13s、模型单次最多 70s，这段时间以前只有转圈。现在把**每一次外部调用**
+上报给平台：工具名 + 入参 + 出参 + 耗时 + 成败。
+
+``wubi/progress`` 把平台 SDK（``miao_sdk``，与 runner 同目录）包成包内 API，
+``facts`` / ``agent`` 把三个真实外部调用包成工具调用：
+``tables.lookup``（内置码表）、``tavily.search``（联网检索）、``llm.decide``（模型判断）。
+``miao_sdk.stream()`` 负责把同步流水线放到后台线程 —— 这样事件能在**阻塞期间**
+就到达调用方，而不是等算完一次性到齐（见 SDK 文档的「为什么必须起线程」）。
+
+本 agent 的两个取舍：**不发 thinking**（模型侧关掉了思维链，没有可报的思考内容就不编）；
+**校验不通过发 ``log(warn)``** 而不是伪装成工具事件（工具 = 外部调用，校验是内存计算）。
+
+三条纪律由 SDK 保证，本 agent 不再重复实现：**永不抛异常**、**无 sink 时零开销**、
+**sink 线程隔离**（并发 invoke 不串味）。事件是**辅助信息**：客户端丢弃它也照样
+能拿到最终结果，它也不参与任何校验门槛。
+
 !! 绝不向外抛异常 !!
 抛出会被平台变成 500/502，调用方只看到「服务异常」，拿不到任何可解释信息。
 所有失败路径都归一成 output 里的一个 dict（含 error 字段）。
@@ -60,7 +78,7 @@ import time
 # 保证无论以哪种方式启动（docker / venv / 直接 python）都能 import 到同目录的 wubi 包
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from wubi import compose, decide, followup, llm, phrase, tables, verify  # noqa: E402
+from wubi import compose, decide, followup, llm, phrase, progress, tables, verify  # noqa: E402
 from wubi import facts as facts_mod  # noqa: E402
 
 # 两次尝试之间共享的预算：超了就带着已有信息返回，而不是让平台 180s 超时后给一个空错误
@@ -156,13 +174,10 @@ def _stream_pieces(text: str):
 
 
 def _stream_result(result: dict):
-    """把完整结果包成 generator（``config["stream"]`` 为真时返回它）。
+    """兜底流式：不能上报进度时（SDK 缺失）把算好的结果按块吐出去。
 
-    约定见 backend/agent_templates/miao_runner.py 的流式说明：
-      * 逐段 ``{"token": ...}`` = 正文，前端据此做打字机；
-      * 最后 ``{"output": result}`` = 结构化结果，runner 不当 token 转发，而是随
-        ``event: done`` 下发；平台据此记录本轮 output —— 这样**流式轮次也能作为
-        下一轮追问的上下文**（否则历史里 output 为空，追问会失去依据）。
+    正常路径见 :func:`_stream_progress` —— 那条路径能在**阻塞期间**就吐进度。
+    本函数只在平台 SDK 不可用时使用（老运行时 / 离线环境），保证功能不丢。
     """
 
     def _gen():
@@ -173,12 +188,35 @@ def _stream_result(result: dict):
     return _gen()
 
 
+def _render_text(result: dict):
+    """给 SDK 的打字机回调：把最终正文切成小块。"""
+    text = result.get("explanation") or result.get("error") or ""
+    for start in range(0, len(text), STREAM_CHUNK):
+        yield text[start:start + STREAM_CHUNK]
+        if STREAM_DELAY > 0:
+            time.sleep(STREAM_DELAY)
+
+
+def _stream_progress(input: dict, config: dict = None):
+    """流式 + 过程上报：把 :func:`_dispatch` 交给平台 SDK 的线程化桥接。
+
+    「边跑边吐进度」的关键在 SDK 的 ``stream()``：``_dispatch`` 是同步阻塞流水线
+    （联网 / 模型都在里面），只有放到后台线程，主线程才能在阻塞**进行中**把进度
+    交给调用方。本函数只负责把业务参数接上去。
+    """
+    return progress.stream(lambda: _dispatch(input, config), render=_render_text)
+
+
 def invoke(input: dict, config: dict = None):
     """平台入口：``config["stream"]`` 为真时返回 generator，否则返回完整 dict。"""
-    result = _dispatch(input, config)
-    if isinstance(result, dict) and (config or {}).get("stream"):
-        return _stream_result(result)
-    return result
+    if (config or {}).get("stream"):
+        if progress.SDK_AVAILABLE:
+            return _stream_progress(input, config)
+        # SDK 缺失（老运行时 / 离线环境）：退回「算完再吐」，功能不受影响，只是看不到过程
+        return _stream_result(_dispatch(input, config))
+    # 非流式路径：确保没有残留 sink，emit 是空操作，行为与改造前完全一致
+    progress.clear()
+    return _dispatch(input, config)
 
 
 def _dispatch(input: dict, config: dict = None) -> dict:
@@ -228,11 +266,13 @@ def _dispatch(input: dict, config: dict = None) -> dict:
         return _fail(char, "事实采集失败：%s: %s" % (type(exc).__name__, str(exc)[:160]))
 
     if not llm.API_KEY:
+        progress.log("模型未配置（缺少 LLM_API_KEY）", level="error")
         return _fail(char, "模型未配置（缺少 LLM_API_KEY）")
 
     try:
         client = llm.build_client()
     except Exception as exc:  # noqa: BLE001
+        progress.log("模型初始化失败：%s" % type(exc).__name__, level="error")
         return _fail(char, "模型初始化失败：%s: %s" % (type(exc).__name__, str(exc)[:160]))
 
     # ── 2. 决策（最多两次，失败把原因喂回去重试） ──
@@ -245,29 +285,46 @@ def _dispatch(input: dict, config: dict = None) -> dict:
 
     for attempt in range(MAX_ATTEMPTS):
         if time.time() - started > TOTAL_BUDGET_SEC:
+            progress.log("本轮预算用尽（%ds），不再重试" % TOTAL_BUDGET_SEC, level="warn")
             break
         attempts = attempt + 1
         p = prompt if rejection is None else decide.add_rejection(prompt, rejection)
-        try:
-            raw = llm.call(client, decide.SYSTEM_PROMPT, p)
-        except Exception as exc:  # noqa: BLE001
-            last_error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
-            rejection = "上一次调用失败：%s" % last_error
-            continue
+        # 模型调用 = 一次工具调用。这是本 agent 最慢的一步（单次上限 70s），
+        # 入参带「第几次尝试」与模型名，出参带模型原文长度与解析结果，
+        # 事后复盘能分清「模型没回」和「回了但格式不对」。
+        with progress.tool(progress.TOOL_LLM,
+                           model=llm.MODEL,
+                           attempt=attempts,
+                           prompt_chars=len(p)) as t:
+            try:
+                raw = llm.call(client, decide.SYSTEM_PROMPT, p)
+            except Exception as exc:  # noqa: BLE001
+                last_error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+                t.fail(last_error)
+                rejection = "上一次调用失败：%s" % last_error
+                continue
 
-        decision = decide.parse_decision(raw)
+            decision = decide.parse_decision(raw)
+            t.output({"chars": len(raw or ""), "parsed": decision is not None})
+
         if decision is None:
+            progress.log("第 %d 次模型输出不是合法 JSON，重试" % attempts, level="warn")
             rejection = "输出不是合法 JSON"
             continue
 
         suggestions = llm.as_suggestions(decision.get("suggestions"))
         result = verify.validate(decision, facts, certain)
+        if not result["ok"]:
+            # 规则校验是纯内存计算，不是工具调用；如实记一条 warn，别伪装成工具
+            progress.log("第 %d 次校验未通过：%s" % (
+                attempts, "；".join(result["violations"])[:120]), level="warn")
         if result["ok"]:
             last_error = None
             break
         rejection = "；".join(result["violations"]) or "自校验未通过"
 
     if result is None or not result.get("code"):
+        progress.log("两次尝试都未得到可用结论", level="error")
         return _fail(char, last_error or rejection or "无法确定该字的五笔编码", attempts)
 
     # ── 3. 组句（服务端拼装，模型不碰整段散文） ──

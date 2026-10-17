@@ -25,7 +25,7 @@ import re
 import time
 from dataclasses import dataclass, field
 
-from . import answer, compose, llm
+from . import answer, compose, llm, progress
 
 # 追问轮的两种形态，输出里的 model 必须如实反映是哪一种：
 #   * reasoned     —— 调了模型（answer.reason），model = 真实模型名
@@ -547,6 +547,7 @@ def handle(char: str, question: str, turns: list | None, started: float) -> dict
     """追问入口：先让模型基于历史事实作答，模型不可用时降级为确定性回答。"""
     prev_turn = last_success_turn(turns)
     if prev_turn is None:
+        progress.log("会话里还没有可用的上一轮结论，无法追问", level="warn")
         return _fail(
             char,
             "追问需要上下文：请先在同一会话里做一次完整拆字（char + code/positions），再追问；"
@@ -560,6 +561,7 @@ def handle(char: str, question: str, turns: list | None, started: float) -> dict
 
     prev_char = (prev_out.get("char") or prev_input.get("char") or "").strip()
     if char and prev_char and char != prev_char:
+        progress.log("追问的字与上一轮不一致，已拒绝以免串味", level="warn")
         return _fail(
             char,
             f"追问的字「{char}」与上一轮的「{prev_char}」不一致：请为新字新建会话，避免串味",
@@ -568,6 +570,7 @@ def handle(char: str, question: str, turns: list | None, started: float) -> dict
     char = char or prev_char
 
     # ── 1) 模型路径：历史作为「已核实事实块」注入，引用必须可核对 ──
+    # （模型调用本身由 answer.reason 内部包成 llm.decide 工具调用）
     reasoned = answer.reason(
         char, question, turns, correction=correction_hint(question, turns)
     )
@@ -577,6 +580,8 @@ def handle(char: str, question: str, turns: list | None, started: float) -> dict
         return out
 
     # ── 2) 降级：模型不可用（没配 key / 调用失败）→ 用历史确定性作答 ──
+    # 如实说「跳过模型」而不是假装成功：用户看到的是「为什么这次没有模型参与」
+    progress.log("模型不可用，改用历史事实做确定性回答", level="warn")
     out = _deterministic(char, question, turns, prev_out, turn_index)
     note = "（本次未能调用模型，以下为基于上一轮历史的确定性回答，未新增任何事实。）"
     if out.get("explanation"):

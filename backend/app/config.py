@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     dashscope_model: str = "qwen-plus"
     encryption_key: str = ""
 
+    # ===== 外部工具服务（注入给 agent 运行时） =====
+    # 联网检索 key。**全局级**：配一次，所有 agent 运行时都能读到
+    # `TAVILY_API_KEY`。留空则不注入，agent 侧会如实降级为「跳过联网」
+    # （wubi-explainer 的 facts.py 会发一条 log 说明）。
+    # 若将来不同 agent 需要不同 key，再改成 agent 级配置（DB 字段 + UI）。
+    tavily_api_key: str = ""
+
     # ===== Phase 2: Agent 运行时健壮性 =====
     agent_max_restarts: int = 5
     agent_restart_base_delay: float = 2.0

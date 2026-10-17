@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 import time
 
-from . import llm
+from . import llm, progress
 from .decide import add_rejection
 
 MAX_ATTEMPTS = int(os.environ.get("WUBI_MAX_ATTEMPTS", "2"))
@@ -395,7 +395,15 @@ def run(input: dict, started: float) -> dict:
         return _fail("输入不合法：%s" % exc)
 
     anchor = facts["phrase"]
+    # 词组的事实由调用方给全，没有联网/码表阶段；把「取码规则」当成一次事实查询工具，
+    # 出参带规则名与位数，复盘时能确认讲解依据的是哪套规则。
+    with progress.tool("tables.rule",
+                       phrase=anchor,
+                       rule=facts["rule"]) as t:
+        t.output({"positions": len(facts["positions"])})
+
     if not llm.API_KEY:
+        progress.log("模型未配置（缺少 LLM_API_KEY）", level="error")
         out = _fail("模型未配置（缺少 LLM_API_KEY）")
         out["char"] = anchor
         return out
@@ -403,6 +411,7 @@ def run(input: dict, started: float) -> dict:
     try:
         client = llm.build_client()
     except Exception as exc:  # noqa: BLE001 - 依赖缺失要变成可解释返回，别让平台看到 500
+        progress.log("模型初始化失败：%s" % type(exc).__name__, level="error")
         out = _fail("模型初始化失败：%s: %s" % (type(exc).__name__, str(exc)[:160]))
         out["char"] = anchor
         return out
@@ -419,20 +428,31 @@ def run(input: dict, started: float) -> dict:
             break
         attempts = attempt + 1
         p = prompt if rejection is None else add_rejection(prompt, rejection)
-        try:
-            raw = llm.call(client, SYSTEM_PROMPT, p)
-        except Exception as exc:  # noqa: BLE001
-            last_error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
-            rejection = "上一次调用失败：%s" % last_error
-            continue
+        with progress.tool(progress.TOOL_LLM,
+                           model=llm.MODEL,
+                           attempt=attempts,
+                           prompt_chars=len(p)) as t:
+            try:
+                raw = llm.call(client, SYSTEM_PROMPT, p)
+            except Exception as exc:  # noqa: BLE001
+                last_error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+                t.fail(last_error)
+                rejection = "上一次调用失败：%s" % last_error
+                continue
 
-        decision = llm.extract_json(raw)
+            decision = llm.extract_json(raw)
+            t.output({"chars": len(raw or ""), "parsed": decision is not None})
+
         if decision is None:
+            progress.log("第 %d 次模型输出不是合法 JSON，重试" % attempts, level="warn")
             rejection = "输出不是合法 JSON"
             continue
 
         suggestions = llm.as_suggestions(decision.get("suggestions"))
         result = validate(decision, facts)
+        if not result["ok"]:
+            progress.log("第 %d 次校验未通过：%s" % (
+                attempts, "；".join(result["violations"])[:120]), level="warn")
         if result["ok"]:
             last_error = None
             break

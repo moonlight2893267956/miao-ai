@@ -46,6 +46,7 @@
 | [`docs/operations/monitoring.md`](docs/operations/monitoring.md) | 监控：日志位置 / 健康探针 / Langfuse |
 | [`docs/api-reference.md`](docs/api-reference.md) | API 端点速查 |
 | [`docs/agent-contract.md`](docs/agent-contract.md) | Agent 契约规范：声明文件怎么写 |
+| [`docs/agent-sdk.md`](docs/agent-sdk.md) | Agent SDK：执行过程上报（`event: progress`），任何 agent 可接入 |
 | [`docs/design/ui-design-system.md`](docs/design/ui-design-system.md) | 前端设计系统 |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | 项目路线图 |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | 开发规范：commit / PR / 文档同步规则 |

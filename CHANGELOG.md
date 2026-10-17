@@ -21,6 +21,41 @@
     - 「重置」按钮（清本地状态并尽力删除服务端会话）
   - **前端 API**：`createConversation` / `getConversation` / `deleteConversation`，`metadata` 支持 `conversation_id`；
     SSE 解析新增 `event: conversation` 分支（此前未知事件会被当 token 拼进正文）
+- **执行事件上报（Agent SDK，平台通用能力）** —— 长耗时 agent 的等待期可见：
+  `demos/wubi-explainer` 的联网检索（单次 4~7s）与模型调用（单次上限 70s）此前不可见，
+  现在每一次外部调用都会上报工具名 + 入参 + 出参 + 耗时 + 成败。**与具体 agent 无关，任何
+  agent 三步即可接入**（见 `docs/agent-sdk.md`）：
+  - 新增 `backend/agent_templates/miao_sdk.py`（**Agent SDK**）：`tool()` 上下文管理器
+    （自动分配 `call_id`、计时、异常也成对收尾且**原样抛出**）、`thinking()`、`log()`、
+    `emit()`（自定义 `kind` 逃生通道）、`stream()`（线程化桥接）。sink 存 `threading.local()`
+    并发不串味；无 sink 时零开销、异常被吞；`seq` 每条流从 1 单调递增；
+    文本/对象有体积上限并**显式标记** `truncated`
+  - 协议设计对齐 OpenAI Responses / Anthropic Messages 的流式事件：**配对靠 `call_id`
+    而非状态字段**，平台**只认 `kind` 一个字段**、其余原样透传（`kind` 永不设白名单）。
+    有意偏离两处：入参出参是**对象**（服务端确定性调用无需流式拼接参数）、
+    当前不做 `*.delta` 增量（`call_id` 已预留配对语义，以后可加）
+  - `miao_runner.py` 认第四种流式块 `{"exec": {...}}` → **`event: exec`**
+    （独立事件名；不当正文、不计入 `done.output`；判断顺序固定为 收尾块 → 事件块 → 正文块，
+    老 agent 零影响）；最近 ≤200 条记进 Langfuse span `metadata.exec_events`；
+    **`_EventRelay` 兜底**：agent 若手写 generator 而非用 `stream()`，`tool()` 的事件
+    由 runner 接住插进流里（否则会静默少几条，极难排查）；每轮 invoke 开始清 SDK 状态
+  - SDK 与 runner 同目录，由平台注入：Dockerfile 第一层 `COPY miao_runner.py miao_sdk.py /app/`，
+    venv 模式 `sys.path[0]` 即 runner 目录 —— agent **不需要**把 SDK 打进 zip 或写进
+    requirements.txt；`sync_runtime_files()` 保证两者成对拷进构建上下文；SDK 缺失时 runner
+    仍能启动（软导入 + 一行 warning）
+  - 平台 `/invoke/stream` 无需改动即透传（原本对未知事件名 `yield line`），
+    现补 `test_invoke_exec_passthrough.py` 把这条隐式契约显式锁住（含「不污染轮次 output」）
+  - Try Run 识别 `event: exec` 并渲染「执行过程」：工具调用按 `call_id` 折叠成一行
+    （名称 + 耗时 + 成败 + 出参摘要），`log` 按级别着色，未知 `kind` 降级为通用条目
+  - 测试：`test_agent_sdk_exec.py`（27）/ `test_runner_stream_exec.py`（10，含 fixture agent
+    与 SDK 缺失兜底）/ `test_invoke_exec_passthrough.py`（5）—— 均不依赖具体 agent；
+    `demos/wubi-explainer/evals/check_exec_events.py` 离线验证「工具调用成对、入参出参来自
+    真实执行、阻塞期间先到、失败如实上报、非流式零事件、事件不引用模型文本」
+  - `demos/wubi-explainer` 作为首个消费者接入：`wubi/progress.py` 绑定平台 SDK，
+    把三个**真实外部调用**包成工具 —— `tables.lookup`（内置码表）、`tavily.search`（联网检索）、
+    `llm.decide`（模型判断，单字 / 词组 / 追问三条路径）。本 agent 的两个取舍：
+    **不发 thinking**（模型侧关掉思维链，没有可报的思考就不编）、
+    **校验不通过发 `log(warn)`** 而不是伪装成工具事件（工具 = 外部调用，校验是内存计算）
 
 ### Fixed
 - agent 镜像只 COPY 入口文件，**多文件 agent 起不来**：`backend/agent_templates/Dockerfile.template`

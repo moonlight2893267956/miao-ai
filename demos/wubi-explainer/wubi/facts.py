@@ -15,7 +15,7 @@ import time
 import urllib.request
 from functools import lru_cache
 
-from . import tables
+from . import progress, tables
 
 TAVILY_ENDPOINT = "https://api.tavily.com/search"
 SEARCH_TIMEOUT = 12.0
@@ -102,6 +102,7 @@ def tavily_lookup(char: str, queries: list[str] | None = None,
     """
     key = _tavily_key()
     if not key:
+        progress.log("未配置 TAVILY_API_KEY，跳过联网，按内置码表与模型作答", level="warn")
         return {"ok": False, "error": "未配置 TAVILY_API_KEY", "code": None}
 
     queries = queries or [
@@ -112,7 +113,7 @@ def tavily_lookup(char: str, queries: list[str] | None = None,
     details: list[str] = []
     last_error = None
 
-    for q in queries:
+    for index, q in enumerate(queries):
         payload = {
             "api_key": key, "query": q, "search_depth": "advanced",
             "max_results": 4, "include_answer": True,
@@ -121,25 +122,36 @@ def tavily_lookup(char: str, queries: list[str] | None = None,
             TAVILY_ENDPOINT, data=json.dumps(payload).encode(),
             headers={"Content-Type": "application/json"},
         )
+        # 每次查询 = 一次工具调用：入参是真实请求，出参是真实返回摘要。
+        # 这是本 agent 最慢的一步（单次 4~7s），也是「等待期可见」的主要收益。
         started = time.time()
-        try:
-            with urllib.request.urlopen(req, timeout=SEARCH_TIMEOUT) as resp:
-                data = json.load(resp)
-        except Exception as exc:  # noqa: BLE001 — 外部依赖只降级、不抛出
-            last_error = f"{type(exc).__name__}: {str(exc)[:120]}"
-            continue
+        with progress.tool(progress.TOOL_SEARCH,
+                           query=q,
+                           search_depth="advanced",
+                           max_results=4) as t:
+            try:
+                with urllib.request.urlopen(req, timeout=SEARCH_TIMEOUT) as resp:
+                    data = json.load(resp)
+            except Exception as exc:  # noqa: BLE001 — 外部依赖只降级、不抛出
+                last_error = f"{type(exc).__name__}: {str(exc)[:120]}"
+                t.fail(last_error)
+                continue
 
-        texts = [str(data.get("answer") or "")]
-        for item in (data.get("results") or [])[:4]:
-            texts.append(str(item.get("content") or ""))
-        for code in extract_codes(*texts):
-            votes[code] = votes.get(code, 0) + 1
-        details.append(f"{q} ({round(time.time() - started, 1)}s)")
+            texts = [str(data.get("answer") or "")]
+            for item in (data.get("results") or [])[:4]:
+                texts.append(str(item.get("content") or ""))
+            found = extract_codes(*texts)
+            for code in found:
+                votes[code] = votes.get(code, 0) + 1
+            details.append(f"{q} ({round(time.time() - started, 1)}s)")
+            t.output({"texts": len(texts), "codes": found})
+
         # 已经与本地码对上，无需再问下一个 query
         if local_code and votes.get(local_code):
             break
 
     if not votes:
+        progress.log("联网检索没有拿到可识别编码，改用内置码表与模型", level="warn")
         return {"ok": False, "code": None, "detail": "; ".join(details),
                 "error": last_error or "检索结果里没有可识别的五笔编码"}
 
@@ -163,6 +175,7 @@ def tavily_lookup(char: str, queries: list[str] | None = None,
         break
 
     if picked is None:
+        progress.log("联网检索到的编码都没通过降噪校验，不采信", level="warn")
         return {"ok": False, "code": None, "candidates": [], "noise": noise,
                 "detail": "; ".join(details),
                 "error": "检索到的编码都没通过降噪校验（多为网页里的英文词）"}
@@ -210,7 +223,13 @@ def collect(char: str, caller_code: str | None = None, allow_online: bool = True
     """
     facts: dict[str, dict] = {}
 
-    local = tables.lookup_code(char)
+    # 内置码表也是一次「外部调用」（读的是 agent 自带数据文件），照样包成工具调用：
+    # 出参里带命中结果与数据版本，事后复盘能对上「当时用的是哪份表」。
+    with progress.tool(progress.TOOL_TABLES, char=char) as t:
+        local = tables.lookup_code(char)
+        t.output({"hit": bool(local),
+                  "code": local["code"] if local else None,
+                  "table": tables.table_digest()})
     facts["local"] = (
         {"ok": True, "code": local["code"], "simple": local.get("simple"),
          "level": local.get("level"), "source": f"内置码表 {tables.table_digest()}"}
@@ -218,9 +237,12 @@ def collect(char: str, caller_code: str | None = None, allow_online: bool = True
     )
 
     # 把本地码喂给联网核验做「键位重叠」这把锁（本地码表本就是主力来源）
-    facts["tavily"] = (tavily_lookup(char, local_code=local["code"] if local else None)
-                       if allow_online else
-                       {"ok": False, "code": None, "error": "按参数要求跳过联网"})
+    if allow_online:
+        facts["tavily"] = tavily_lookup(char, local_code=local["code"] if local else None)
+    else:
+        # 调用方明确要求离线：如实说「跳过」，而不是让界面无限转圈
+        progress.log("调用方要求离线，跳过联网核验", level="info")
+        facts["tavily"] = {"ok": False, "code": None, "error": "按参数要求跳过联网"}
 
     # 调用方给的码不算事实，只是「它认为的答案」——单列，便于报告分歧
     if caller_code:

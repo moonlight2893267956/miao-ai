@@ -141,9 +141,11 @@ data: {"trace_id": "...", "latency_ms": 4192,
 | 事件 | 何时出现 | 平台怎么用 |
 |---|---|---|
 | `token` | agent 逐段 yield `{"token": ...}` | 原样转发，前端逐段渲染（打字机） |
+| `exec` | agent 上报执行事件（`{"exec": {...}}`）：工具调用 / 结果 / 日志 / 思考 | 原样转发，**平台不解释语义**（任意 `kind` 都可）；**不计入** output，客户端丢弃也不影响结果。契约见 [`agent-sdk.md`](agent-sdk.md) |
 | `output` | agent 返回普通 dict（不是 generator） | 平台取它作为该轮 output；前端一次性展示，**没有打字机** |
 | `done` | 流结束 | `trace_id` 建 Langfuse 链接；若带 `output`（agent yield 的收尾块）则作为该轮 output 落库 |
 | `error` | agent / 转发出错，或客户端断连 | 该轮记 `failed`，不参与后续历史注入 |
+| 其它未知事件名 | agent 自定义 | **全量透传**；客户端不认识就忽略（平台不按白名单过滤，新增事件是纯加法） |
 
 > 带会话时**必须**让 `done.output` 或 `output` 事件能给出结构化结果，否则这一轮在会话历史里
 > output 为空，下一轮追问会失去依据（平台会明确报「追问需要上下文」）。

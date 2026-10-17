@@ -21,8 +21,9 @@
 from __future__ import annotations
 
 import os
+import time
 
-from . import llm
+from . import llm, progress
 
 # 追问最多尝试几次（与主链一样：失败把原因喂回去再试一次）
 MAX_ATTEMPTS = int(os.environ.get("WUBI_FOLLOWUP_ATTEMPTS", "2"))
@@ -378,16 +379,30 @@ def reason(
     for attempt in range(MAX_ATTEMPTS):
         attempts = attempt + 1
         p = prompt if not problems else prompt + rejection_feedback(problems)
-        try:
-            raw = llm.call(client, SYSTEM_PROMPT, p)
-        except Exception:  # noqa: BLE001 - 网络/鉴权失败：不重试，直接降级
-            return None
-        data = llm.extract_json(raw)
-        if not isinstance(data, dict):
-            problems = ["输出不是合法 JSON"]
-            continue
-        parsed = data
-        problems = validate(data, allowed, cands, correction)
+        with progress.tool(progress.TOOL_LLM,
+                           model=llm.MODEL,
+                           attempt=attempts,
+                           mode="followup",
+                           prompt_chars=len(p)) as t:
+            try:
+                raw = llm.call(client, SYSTEM_PROMPT, p)
+            except Exception as exc:  # noqa: BLE001 - 网络/鉴权失败：不重试，直接降级
+                t.fail("%s: %s" % (type(exc).__name__, str(exc)[:200]))
+                return None
+            data = llm.extract_json(raw)
+            if not isinstance(data, dict):
+                t.fail("输出不是合法 JSON")
+                problems = ["输出不是合法 JSON"]
+                continue
+            parsed = data
+            problems = validate(data, allowed, cands, correction)
+            t.output({"chars": len(raw or ""),
+                      "problems": len(problems)})
+
+        if problems:
+            # 引用核对是内存计算，不是工具调用；如实记 warn
+            progress.log("第 %d 次引用核对未通过：%s" % (
+                attempts, "；".join(problems)[:120]), level="warn")
         if not problems:
             break
 
